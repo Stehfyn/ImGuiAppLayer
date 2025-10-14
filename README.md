@@ -1,14 +1,14 @@
 # ImGuiAppLayer
 
 ```C++
-struct TestLayer : ImGuiAppLayer
+struct DemoAppLayer : ImGuiAppLayer
 {
   virtual void OnAttach(ImGuiApp*) override final
   {
     Counter++;
   }
 
-  virtual void OnRender(const ImGuiApp* app) override final
+  virtual void OnRender(const ImGuiApp*) override final
   {
     ImGui::Begin("App Layer Window");
     ImGui::Text("Hello from App Layer!");
@@ -24,7 +24,7 @@ static void ShowImGuiAppLayerDemo()
   static ImGuiApp app;
 
   if (1 == ImGui::GetFrameCount())
-    ImGui::PushAppLayer<TestLayer>(&app);
+    ImGui::PushAppLayer<DemoAppLayer>(&app);
 
   ImGui::UpdateApp(&app);
   ImGui::RenderApp(&app);
