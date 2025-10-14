@@ -5,8 +5,6 @@
 #include <type_traits>
 
 struct ImGuiApp;
-struct ImGuiAppLayer;
-struct ImGuiAppLayerBase;
 
 struct ImGuiAppLayerBase
 {
