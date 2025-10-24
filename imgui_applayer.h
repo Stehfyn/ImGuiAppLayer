@@ -6,6 +6,10 @@
 #include <type_traits>
 #include <string_view>
 
+#ifndef IM_UNREFERENCED_PARAMETER
+  #define IM_UNREFERENCED_PARAMETER(x) (void)(x)
+#endif
+
 template <typename T>
 inline constexpr const char* FunctionSignature()
 {
@@ -47,17 +51,9 @@ inline constexpr std::string_view MakeTypeName()
     return ParseType(FunctionSignature<T>());
 }
 
-template <typename T>
-inline constexpr std::string_view MakeTypeNameMinimal()
-{
-    return RemoveNamespaces(ParseType(FunctionSignature<T>()));
-}
-
 inline constexpr ImGuiID ConstantHash(std::string_view sv)
 {
-    return *sv.data() ?
-        static_cast<ImGuiID>(*sv.data()) + 33 * ConstantHash(sv.data() + 1) :
-        5381;
+    return *sv.data() ? static_cast<ImGuiID>(*sv.data()) + 33 * ConstantHash(sv.data() + 1) : 5381;
 }
 
 template <typename T> 
@@ -65,18 +61,24 @@ struct ImGuiType
 {
     static constexpr ImGuiID ID{ConstantHash(MakeTypeName<T>())};
     static constexpr std::string_view Name{MakeTypeName<T>()};
-    static constexpr std::string_view ShortName{MakeTypeNameMinimal<T>()};
 };
 
 struct ImGuiApp;
 
+enum ImGuiAppCommand;
+enum ImGuiAppCommand
+{
+  ImGuiAppCommand_None = 0,
+  ImGuiAppCommand_Shutdown = 1,
+};
+
 struct ImGuiAppLayerBase
 {
   virtual ~ImGuiAppLayerBase() = default;
-  virtual void OnAttach(ImGuiApp*) = 0;
-  virtual void OnDetach(ImGuiApp*) = 0;
-  virtual void OnUpdate(ImGuiApp*, float) = 0;
-  virtual void OnRender(const ImGuiApp*) = 0;
+  virtual void OnAttach(ImGuiApp*) const = 0;
+  virtual void OnDetach(ImGuiApp*) const = 0;
+  virtual void OnUpdate(ImGuiApp*, float) const = 0;
+  virtual void OnRender(const ImGuiApp*) const = 0;
 
 protected:
   ImGuiAppLayerBase() = default;
@@ -84,10 +86,34 @@ protected:
 
 struct ImGuiAppLayer : ImGuiAppLayerBase
 {
-  virtual void OnAttach(ImGuiApp*) override {}
-  virtual void OnDetach(ImGuiApp*) override {}
-  virtual void OnUpdate(ImGuiApp*, float) override {}
-  virtual void OnRender(const ImGuiApp*) override {}
+  virtual void OnAttach(ImGuiApp*) const override {}
+  virtual void OnDetach(ImGuiApp*) const override {}
+  virtual void OnUpdate(ImGuiApp*, float) const override {}
+  virtual void OnRender(const ImGuiApp*) const override {}
+};
+
+struct ImGuiAppTaskLayer : ImGuiAppLayer
+{
+  virtual void OnAttach(ImGuiApp*) const override final;
+  virtual void OnDetach(ImGuiApp*) const override final;
+  virtual void OnUpdate(ImGuiApp*, float) const override final;
+  virtual void OnRender(const ImGuiApp*) const override final;
+};
+
+struct ImGuiAppCommandLayer : ImGuiAppLayer
+{
+  virtual void OnAttach(ImGuiApp*) const override final;
+  virtual void OnDetach(ImGuiApp*) const override final;
+  virtual void OnUpdate(ImGuiApp*, float) const override final;
+  virtual void OnRender(const ImGuiApp*) const override final;
+};
+
+struct ImGuiAppStatusLayer : ImGuiAppLayer
+{
+  virtual void OnAttach(ImGuiApp*) const override final;
+  virtual void OnDetach(ImGuiApp*) const override final;
+  virtual void OnUpdate(ImGuiApp*, float) const override final;
+  virtual void OnRender(const ImGuiApp*) const override final;
 };
 
 struct ImGuiControlBase
@@ -96,7 +122,7 @@ struct ImGuiControlBase
 
   virtual void OnInitialize(ImGuiApp*) const = 0;
   virtual void OnShutdown(ImGuiApp*) const = 0;
-  virtual void OnGetCommand(const ImGuiApp*, int*) const = 0;
+  virtual void OnGetCommand(const ImGuiApp*, ImGuiAppCommand*) const = 0;
   virtual void OnUpdate(ImGuiApp*, float) const = 0;
   virtual void OnRender(const ImGuiApp*) const = 0;
 protected:
@@ -105,7 +131,7 @@ protected:
 
 struct ImGuiAppBase
 {
-  virtual void OnExecuteCommand(int command) = 0;
+  virtual void OnExecuteCommand(ImGuiAppCommand cmd) = 0;
 
   virtual ~ImGuiAppBase() = default;
 protected:
@@ -117,8 +143,8 @@ struct ImGuiApp : ImGuiAppBase
   ImGuiStorage Data;
   ImVector<ImGuiControlBase*> Controls;
   ImVector<ImGuiAppLayerBase*> Layers;
-
-  virtual void OnExecuteCommand(int command) override {}
+  virtual void OnExecuteCommand(ImGuiAppCommand cmd) override;
+  bool ShutdownCommanded;
 };
 
 template <typename ControlData, typename... DataDependencies>
@@ -128,8 +154,8 @@ struct ImGuiControlAdapterBase
 
   virtual void OnInitialize(ImGuiApp* app, ControlData* data, const DataDependencies*...) const = 0;
   virtual void OnShutdown(ImGuiApp* app, ControlData* data, const DataDependencies*...) const = 0;
-  virtual void OnGetCommand(const ImGuiApp* app, int* command, ControlData* data, const DataDependencies*...) const = 0;
-  virtual void OnUpdate(ImGuiApp* app, float dt, ControlData* data) const = 0;
+  virtual void OnGetCommand(const ImGuiApp* app, ImGuiAppCommand* cmd, ControlData* data, const DataDependencies*...) const = 0;
+  virtual void OnUpdate(ImGuiApp* app, float dt, ControlData* data, const DataDependencies*...) const = 0;
   virtual void OnRender(const ImGuiApp* app, ControlData* data, const DataDependencies*...) const = 0;
 protected:
   ImGuiControlAdapterBase() = default;
@@ -139,11 +165,12 @@ template <typename ControlData, typename... DataDependencies>
 struct ImGuiControlAdapter : ImGuiControlBase, ImGuiControlAdapterBase<ControlData, DataDependencies...>
 {
     template <typename T> 
-    inline T* GetData(const ImGuiApp* app) const
+    inline T* GetAppData(const ImGuiApp* app) const
     {
       T* data;
 
-      //static_assert((std::disjunction_v<std::is_same<T, DataDependencies>...>), "Type T is not a valid data dependency for this control.");
+      static_assert((std::is_same_v<T, ControlData>) || (std::disjunction_v<std::is_same<T, DataDependencies>...>),
+        "Type T is not a valid data dependency for this control.");
 
       data = static_cast<T*>(app->Data.GetVoidPtr(ImGuiType<T>::ID));
       IM_ASSERT(data);
@@ -155,59 +182,39 @@ struct ImGuiControlAdapter : ImGuiControlBase, ImGuiControlAdapterBase<ControlDa
     {
       return std::tuple<DataDependencies*...>
       {
-        GetData<DataDependencies>(app)...
+        GetAppData<DataDependencies>(app)...
       };
     }
 
     virtual void OnInitialize(ImGuiApp* app) const override final
     {
-      std::apply([this, app](DataDependencies*... dependencies)
-        {
-          this->OnInitialize(app, GetData<ControlData>(const_cast<const ImGuiApp*>(app)), dependencies...);
-        },
-        GetAllDependencyData(const_cast<const ImGuiApp*>(app)));
+      std::apply([=](DataDependencies*... dependencies) { OnInitialize(app, GetAppData<ControlData>(app), dependencies...); }, GetAllDependencyData(app));
     }
 
     virtual void OnShutdown(ImGuiApp* app) const override final
     {
-      std::apply([this, app](DataDependencies*... dependencies)
-        {
-          this->OnShutdown(app, GetData<ControlData>(const_cast<const ImGuiApp*>(app)), dependencies...);
-        },
-        GetAllDependencyData(const_cast<const ImGuiApp*>(app)));
+      std::apply([=](DataDependencies*... dependencies) { OnShutdown(app, GetAppData<ControlData>(app), dependencies...); }, GetAllDependencyData(app));
     }
 
-    virtual void OnGetCommand(const ImGuiApp* app, int* command) const override final
+    virtual void OnGetCommand(const ImGuiApp* app, ImGuiAppCommand* cmd) const override final
     {
-      std::apply([this, app, command](DataDependencies*... dependencies)
-        {
-          this->OnGetCommand(app, command, GetData<ControlData>(app), dependencies...);
-        },
-        GetAllDependencyData(app));
+      std::apply([=](DataDependencies*... dependencies) { OnGetCommand(app, cmd, GetAppData<ControlData>(app), dependencies...); }, GetAllDependencyData(app));
     }
 
     virtual void OnUpdate(ImGuiApp* app, float dt) const override final
     {
-      std::apply([this, app, dt](DataDependencies*... dependencies)
-        {
-          this->OnUpdate(app, dt, GetData<ControlData>(const_cast<const ImGuiApp*>(app)), dependencies...);
-        },
-        GetAllDependencyData(const_cast<const ImGuiApp*>(app)));
+      std::apply([=](DataDependencies*... dependencies) { OnUpdate(app, dt, GetAppData<ControlData>(app), dependencies...); }, GetAllDependencyData(app));
     }
 
     virtual void OnRender(const ImGuiApp* app) const override final
     {
-      std::apply([this, app](DataDependencies*... dependencies)
-        {
-          this->OnRender(app, GetData<ControlData>(app), dependencies...);
-        },
-        GetAllDependencyData(app));
+      std::apply([=](DataDependencies*... dependencies) { OnRender(app, GetAppData<ControlData>(app), dependencies...); }, GetAllDependencyData(app));
     }
 
     virtual void OnInitialize(ImGuiApp* app, ControlData* data, const DataDependencies*...) const override {}
     virtual void OnShutdown(ImGuiApp* app, ControlData* data, const DataDependencies*...) const override {}
-    virtual void OnGetCommand(const ImGuiApp* app, int* command, ControlData* data, const DataDependencies*...) const override {}
-    virtual void OnUpdate(ImGuiApp* app, float dt, ControlData* data) const override {}
+    virtual void OnGetCommand(const ImGuiApp* app, ImGuiAppCommand* cmd, ControlData* data, const DataDependencies*...) const override {}
+    virtual void OnUpdate(ImGuiApp* app, float dt, ControlData* data, const DataDependencies*...) const override {}
     virtual void OnRender(const ImGuiApp* app, ControlData* data, const DataDependencies*...) const override {}
 };
 
@@ -217,109 +224,108 @@ struct ImGuiControl : ImGuiControlAdapter<ControlData, DataDependencies...>
   using ControlDataType = ControlData;
 };
 
-struct ImGuiAppCommandLayer : ImGuiAppLayer
-{
-  virtual void OnUpdate(ImGuiApp* app, float) override final
-  {
-    int command = 0;
-
-    for (auto& control : app->Controls)
-      control->OnGetCommand(app, &command);
-
-    app->OnExecuteCommand(command);
-  }
-};
-
-struct ImGuiAppStatusLayer : ImGuiAppLayer
-{
-  virtual void OnUpdate(ImGuiApp* app, float dt) override final
-  {
-    for (auto& control : app->Controls)
-      control->OnUpdate(app, dt);
-  }
-
-  virtual void OnRender(const ImGuiApp* app) override final
-  {
-    for (auto& control : app->Controls)
-      control->OnRender(app);
-  }
-};
-
 namespace ImGui
 {
   inline void InitializeApp(ImGuiApp* app);
+  inline void ShutdownApp(ImGuiApp* app);
+  inline void UpdateApp(ImGuiApp* app);
+  inline void RenderApp(const ImGuiApp* app);
+
   template <typename T>
   inline void PushAppLayer(ImGuiApp* app);
   inline void PopAppLayer(ImGuiApp* app);
-  inline void UpdateApp(ImGuiApp* app);
-  inline void RenderApp(const ImGuiApp* app);
+
   template <typename T>
-  inline void AddAppControl(ImGuiApp* app);
+  inline void PushAppControl(ImGuiApp* app);
+  inline void PopAppControl(ImGuiApp* app);
 }
 
 namespace ImGui
 {
   inline void InitializeApp(ImGuiApp* app)
   {
-    IM_ASSERT(app);
+      IM_ASSERT(app);
 
-    PushAppLayer<ImGuiAppCommandLayer>(app);
-    PushAppLayer<ImGuiAppStatusLayer>(app);
+      PushAppLayer<ImGuiAppCommandLayer>(app);
+      PushAppLayer<ImGuiAppStatusLayer>(app);
+  }
+
+  inline void ShutdownApp(ImGuiApp* app)
+  {
+      IM_ASSERT(app);
+
+      while (!app->Controls.empty())
+        PopAppControl(app);
+
+      while (!app->Layers.empty())
+        PopAppLayer(app);
+  }
+
+  inline void UpdateApp(ImGuiApp* app)
+  {
+      IM_ASSERT(app);
+
+      for (auto& layer : app->Layers)
+        layer->OnUpdate(app, GetIO().DeltaTime);
+  }
+
+  inline void RenderApp(const ImGuiApp* app)
+  {
+      IM_ASSERT(app);
+
+      for (auto& layer : app->Layers)
+        layer->OnRender(app);
   }
 
   template <typename T>
   inline void PushAppLayer(ImGuiApp* app)
   {
-    IM_STATIC_ASSERT((std::is_base_of_v<ImGuiAppLayerBase, T>));
-    IM_ASSERT(app);
+      //IM_STATIC_ASSERT((std::is_base_of_v<ImGuiAppLayerBase, T>));
+      IM_ASSERT(app);
 
-    app->Layers.push_back(IM_NEW(T)());
-    app->Layers.back()->OnAttach(app);
+      app->Layers.push_back(IM_NEW(T)());
+      app->Layers.back()->OnAttach(app);
   }
 
   inline void PopAppLayer(ImGuiApp* app)
   {
-    IM_ASSERT(app);
+      IM_ASSERT(app);
 
-    if (app->Layers.empty())
-      return;
+      if (app->Layers.empty())
+        return;
 
-    app->Layers.back()->OnDetach(app);
-    app->Layers.pop_back();
-  }
-
-  inline void UpdateApp(ImGuiApp* app)
-  {
-    IM_ASSERT(app);
-
-    for (auto& layer : app->Layers)
-      layer->OnUpdate(app, GetIO().DeltaTime);
-  }
-
-  inline void RenderApp(const ImGuiApp* app)
-  {
-    IM_ASSERT(app);
-
-    for (auto& layer : app->Layers)
-      layer->OnRender(app);
+      app->Layers.back()->OnDetach(app);
+      app->Layers.pop_back();
   }
 
   template <typename T>
-  inline void AddAppControl(ImGuiApp* app)
+  inline void PushAppControl(ImGuiApp* app)
   {
-    T* control;
-    typename T::ControlDataType* data;
+      T* control;
+      typename T::ControlDataType* data;
 
-    IM_ASSERT(app);
+      IM_ASSERT(app);
 
-    control = IM_NEW(T)();
-    IM_ASSERT(control);
+      control = IM_NEW(T)();
+      IM_ASSERT(control);
 
-    data = IM_NEW(typename T::ControlDataType)();
-    IM_ASSERT(data);
+      data = IM_NEW(typename T::ControlDataType)();
+      IM_ASSERT(data);
 
-    app->Data.SetVoidPtr(ImGuiType<typename T::ControlDataType>::ID, data);
-    app->Controls.push_back(control);
-    app->Controls.back()->OnInitialize(app);
+      app->Data.SetVoidPtr(ImGuiType<typename T::ControlDataType>::ID, data);
+      app->Controls.push_back(control);
+      app->Controls.back()->OnInitialize(app);
+  }
+
+  inline void PopAppControl(ImGuiApp* app)
+  {
+      IM_ASSERT(app);
+      
+      if (app->Controls.empty())
+        return;
+
+      app->Controls.back()->OnShutdown(app);
+      app->Controls.pop_back();
   }
 }
+
