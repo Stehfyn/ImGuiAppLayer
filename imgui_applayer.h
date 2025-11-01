@@ -123,7 +123,7 @@ struct ImGuiControlBase
   virtual void OnInitialize(ImGuiApp*) const = 0;
   virtual void OnShutdown(ImGuiApp*) const = 0;
   virtual void OnGetCommand(const ImGuiApp*, ImGuiAppCommand*) const = 0;
-  virtual void OnUpdate(ImGuiApp*, float) const = 0;
+  virtual void OnUpdate(const ImGuiApp*, float) const = 0;
   virtual void OnRender(const ImGuiApp*) const = 0;
 protected:
   ImGuiControlBase() = default;
@@ -147,29 +147,36 @@ struct ImGuiApp : ImGuiAppBase
   bool ShutdownCommanded;
 };
 
-template <typename ControlData, typename... DataDependencies>
+template <typename ControlData, typename TempData, typename... DataDependencies>
 struct ImGuiControlAdapterBase
 {
   virtual ~ImGuiControlAdapterBase() = default;
 
   virtual void OnInitialize(ImGuiApp* app, ControlData* data, const DataDependencies*...) const = 0;
   virtual void OnShutdown(ImGuiApp* app, ControlData* data, const DataDependencies*...) const = 0;
-  virtual void OnGetCommand(const ImGuiApp* app, ImGuiAppCommand* cmd, ControlData* data, const DataDependencies*...) const = 0;
-  virtual void OnUpdate(ImGuiApp* app, float dt, ControlData* data, const DataDependencies*...) const = 0;
-  virtual void OnRender(const ImGuiApp* app, ControlData* data, const DataDependencies*...) const = 0;
+  virtual void OnGetCommand(const ImGuiApp* app, ImGuiAppCommand* cmd, const ControlData* data, const TempData* temp_data, const DataDependencies*...) const = 0;
+  virtual void OnUpdate(const ImGuiApp* app, float dt, ControlData* data, const TempData* temp_data, const TempData* last_temp_data, const DataDependencies*...) const = 0;
+  virtual void OnRender(const ImGuiApp* app, const ControlData* data, TempData* temp_data, const DataDependencies*...) const = 0;
 protected:
   ImGuiControlAdapterBase() = default;
 };
 
-template <typename ControlData, typename... DataDependencies>
-struct ImGuiControlAdapter : ImGuiControlBase, ImGuiControlAdapterBase<ControlData, DataDependencies...>
+template <typename ControlData, typename TempData, typename... DataDependencies>
+struct ImGuiControlAdapter : ImGuiControlBase, ImGuiControlAdapterBase<ControlData, TempData, DataDependencies...>
 {
+    struct InstanceData
+    {
+      ControlData Control;
+      TempData Temp;
+      TempData LastTemp;
+    };
+
     template <typename T> 
-    inline T* GetAppData(const ImGuiApp* app) const
+    inline T* GetData(const ImGuiApp* app) const
     {
       T* data;
 
-      static_assert((std::is_same_v<T, ControlData>) || (std::disjunction_v<std::is_same<T, DataDependencies>...>),
+      static_assert((std::is_same_v<T, InstanceData>) || (std::disjunction_v<std::is_same<T, DataDependencies>...>),
         "Type T is not a valid data dependency for this control.");
 
       data = static_cast<T*>(app->Data.GetVoidPtr(ImGuiType<T>::ID));
@@ -180,48 +187,49 @@ struct ImGuiControlAdapter : ImGuiControlBase, ImGuiControlAdapterBase<ControlDa
 
     inline std::tuple<DataDependencies*...> GetAllDependencyData(const ImGuiApp* app) const
     {
-      return std::tuple<DataDependencies*...>
-      {
-        GetAppData<DataDependencies>(app)...
-      };
+      return { GetData<DataDependencies>(app)... };
     }
 
     virtual void OnInitialize(ImGuiApp* app) const override final
     {
-      std::apply([=](DataDependencies*... dependencies) { OnInitialize(app, GetAppData<ControlData>(app), dependencies...); }, GetAllDependencyData(app));
+      std::apply([=](DataDependencies*... dependencies) { OnInitialize(app, &GetData<InstanceData>(app)->Control, dependencies...); }, GetAllDependencyData(app));
     }
 
     virtual void OnShutdown(ImGuiApp* app) const override final
     {
-      std::apply([=](DataDependencies*... dependencies) { OnShutdown(app, GetAppData<ControlData>(app), dependencies...); }, GetAllDependencyData(app));
+      std::apply([=](DataDependencies*... dependencies) { OnShutdown(app, &GetData<InstanceData>(app)->Control, dependencies...); }, GetAllDependencyData(app));
     }
 
     virtual void OnGetCommand(const ImGuiApp* app, ImGuiAppCommand* cmd) const override final
     {
-      std::apply([=](DataDependencies*... dependencies) { OnGetCommand(app, cmd, GetAppData<ControlData>(app), dependencies...); }, GetAllDependencyData(app));
+      std::apply([=](DataDependencies*... dependencies) { OnGetCommand(app, cmd, &GetData<InstanceData>(app)->Control, &GetData<InstanceData>(app)->Temp, dependencies...); }, GetAllDependencyData(app));
     }
 
-    virtual void OnUpdate(ImGuiApp* app, float dt) const override final
+    virtual void OnUpdate(const ImGuiApp* app, float dt) const override final
     {
-      std::apply([=](DataDependencies*... dependencies) { OnUpdate(app, dt, GetAppData<ControlData>(app), dependencies...); }, GetAllDependencyData(app));
+      const TempData* temp_data = &GetData<InstanceData>(app)->Temp;
+      std::apply([=](DataDependencies*... dependencies) { OnUpdate(app, dt, &GetData<InstanceData>(app)->Control, temp_data, &GetData<InstanceData>(app)->LastTemp, dependencies...); }, GetAllDependencyData(app));
+      GetData<InstanceData>(app)->LastTemp = *temp_data;
     }
 
     virtual void OnRender(const ImGuiApp* app) const override final
     {
-      std::apply([=](DataDependencies*... dependencies) { OnRender(app, GetAppData<ControlData>(app), dependencies...); }, GetAllDependencyData(app));
+      TempData* temp_data = &GetData<InstanceData>(app)->Temp;
+      (*temp_data) = {};
+      std::apply([=](DataDependencies*... dependencies) { OnRender(app, &GetData<InstanceData>(app)->Control, temp_data, dependencies...); }, GetAllDependencyData(app));
     }
 
     virtual void OnInitialize(ImGuiApp* app, ControlData* data, const DataDependencies*...) const override {}
     virtual void OnShutdown(ImGuiApp* app, ControlData* data, const DataDependencies*...) const override {}
-    virtual void OnGetCommand(const ImGuiApp* app, ImGuiAppCommand* cmd, ControlData* data, const DataDependencies*...) const override {}
-    virtual void OnUpdate(ImGuiApp* app, float dt, ControlData* data, const DataDependencies*...) const override {}
-    virtual void OnRender(const ImGuiApp* app, ControlData* data, const DataDependencies*...) const override {}
+    virtual void OnGetCommand(const ImGuiApp* app, ImGuiAppCommand* cmd, const ControlData* data, const TempData* temp_data, const DataDependencies*...) const override {}
+    virtual void OnUpdate(const ImGuiApp* app, float dt, ControlData* data, const TempData* temp_data, const TempData* last_temp_data, const DataDependencies*...) const override {}
+    virtual void OnRender(const ImGuiApp* app,const ControlData* data, TempData* temp_data, const DataDependencies*...) const override {}
 };
 
-template <typename ControlData, typename... DataDependencies>
-struct ImGuiControl : ImGuiControlAdapter<ControlData, DataDependencies...>
+template <typename ControlData, typename TempData, typename... DataDependencies>
+struct ImGuiControl : ImGuiControlAdapter<ControlData, TempData, DataDependencies...>
 {
-  using ControlDataType = ControlData;
+  using ControlInstanceDataType = ImGuiControlAdapter<ControlData, TempData, DataDependencies...>::InstanceData;
 };
 
 namespace ImGui
@@ -238,6 +246,8 @@ namespace ImGui
   template <typename T>
   inline void PushAppControl(ImGuiApp* app);
   inline void PopAppControl(ImGuiApp* app);
+
+  void ShowAppLayerDemo();
 }
 
 namespace ImGui
@@ -246,6 +256,7 @@ namespace ImGui
   {
       IM_ASSERT(app);
 
+      //PushAppLayer<ImGuiTask>
       PushAppLayer<ImGuiAppCommandLayer>(app);
       PushAppLayer<ImGuiAppStatusLayer>(app);
   }
@@ -302,17 +313,17 @@ namespace ImGui
   inline void PushAppControl(ImGuiApp* app)
   {
       T* control;
-      typename T::ControlDataType* data;
+      typename T::ControlInstanceDataType* data;
 
       IM_ASSERT(app);
 
       control = IM_NEW(T)();
       IM_ASSERT(control);
 
-      data = IM_NEW(typename T::ControlDataType)();
+      data = IM_NEW(typename T::ControlInstanceDataType)();
       IM_ASSERT(data);
 
-      app->Data.SetVoidPtr(ImGuiType<typename T::ControlDataType>::ID, data);
+      app->Data.SetVoidPtr(ImGuiType<typename T::ControlInstanceDataType>::ID, data);
       app->Controls.push_back(control);
       app->Controls.back()->OnInitialize(app);
   }

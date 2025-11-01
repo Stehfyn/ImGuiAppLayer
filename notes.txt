@@ -1,0 +1,15 @@
+The design pillar here is
+Event-sourcing
+
+Unfortunately, naively, this will incur unnecessary copies
+This will compound if we leave this as is, and will add complexity if we
+opt for handling in place 
+
+This feature has the additional requirement for an on-control basis.
+
+All roads point to additional templating, which is fine.
+We have precedence for an interface we think is appropriate.
+The technicality comes from implementation plumbing
+
+There's an additional issue where it's like, we want to optionally request--the client nominally may not want/need to.
+This makes me question perhaps we want an OnDemand requesting
