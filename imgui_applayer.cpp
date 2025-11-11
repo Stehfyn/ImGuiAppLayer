@@ -4,7 +4,7 @@
 
 void ImGuiApp::OnExecuteCommand(ImGuiAppCommand cmd)
 {
-	  IM_UNUSED(cmd);
+    IM_UNUSED(cmd);
 }
 
 void ImGuiAppTaskLayer::OnAttach(ImGuiApp* app ) const
@@ -40,7 +40,7 @@ void ImGuiAppCommandLayer::OnDetach(ImGuiApp* app) const
 
 void ImGuiAppCommandLayer::OnUpdate(ImGuiApp* app, float dt) const
 {
-	  IM_UNUSED(dt);
+    IM_UNUSED(dt);
 
     ImGuiAppCommand cmd;
     ImBitArray<ImGuiAppCommand_COUNT> arr;
@@ -102,7 +102,7 @@ namespace
     char text[128];
     char timer_text[128];
     float timer_secs;
-		float t_value;
+    float t_value;
     float t_direction;
     ImVec4 col;
   };
@@ -129,8 +129,8 @@ namespace
       if (temp_data->hovered ^ last_temp_data->hovered)
       {
         data->timer_secs = 30.0f * temp_data->hovered;
-				data->t_value = 0.0f;
-			  data->t_direction = 1.0f;
+        data->t_value = 0.0f;
+        data->t_direction = 1.0f;
       }
 
       if (0.0f < data->timer_secs)
@@ -145,7 +145,7 @@ namespace
       if (temp_data->hovered)
       {
         data->t_value = ImLinearSweep(data->t_value, data->t_direction, dt);
-				data->t_direction = (data->t_value == data->t_direction) ? -data->t_direction : data->t_direction;
+        data->t_direction = (data->t_value == data->t_direction) ? -data->t_direction : data->t_direction;
         data->col = ImLerp(ImGui::GetStyleColorVec4(ImGuiCol_Button), ImGui::GetStyleColorVec4(ImGuiCol_WindowBg), 0.0f <= data->t_value ? data->t_value : -data->t_value);
       }
     }
@@ -161,7 +161,7 @@ namespace
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, data->col);
         ImGui::Button("Hover Me!", size);
         temp_data->hovered = ImGui::IsItemHovered();
-				ImGui::PopStyleColor();
+        ImGui::PopStyleColor();
 
         pos = ImGui::GetCursorScreenPos();
         size = ImGui::GetContentRegionAvail();
@@ -169,7 +169,7 @@ namespace
 
         ImGui::PushClipRect(r.Min, r.Max, true);
         ImGui::NewLine();
-				RenderTextT(data->timer_text, ImGui::CalcTextSize(data->timer_text), ImGui::GetCursorScreenPos(), ImGui::GetContentRegionAvail(), data->t_value);
+        RenderTextT(data->timer_text, ImGui::CalcTextSize(data->timer_text), ImGui::GetCursorScreenPos(), ImGui::GetContentRegionAvail(), data->t_value);
         ImGui::PopClipRect();
       }
       ImGui::End();
