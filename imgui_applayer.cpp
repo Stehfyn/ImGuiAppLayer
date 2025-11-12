@@ -229,7 +229,7 @@ namespace ImGui
       UpdateApp(&app);
       RenderApp(&app);
 
-      if (app.ShutdownCommanded)
+      if (app.ShutdownPending)
         ShutdownApp(&app);
   }
 }

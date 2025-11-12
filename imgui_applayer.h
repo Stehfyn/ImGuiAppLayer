@@ -25,6 +25,11 @@ Index of this file:
 #include <type_traits>                    // 
 #include <string_view>                    // 
 
+#ifdef _MSC_VER
+#pragma warning (push)
+#pragma warning (disable: 26495)          // [Static Analyzer] Variable 'XXX' is uninitialized. Always initialize a member variable (type.6).
+#endif
+
 //-----------------------------------------------------------------------------
 // [SECTION] Forward declarations and basic types
 //-----------------------------------------------------------------------------
@@ -210,7 +215,7 @@ struct ImGuiApp : ImGuiAppBase
   ImVector<ImGuiAppLayerBase*> Layers;
 
   virtual void OnExecuteCommand(ImGuiAppCommand cmd) override;
-  bool ShutdownCommanded;
+  bool ShutdownPending;
 };
 
 template <typename ControlData, typename TempData, typename... DataDependencies>
@@ -345,3 +350,6 @@ namespace ImGui
   }
 }
 
+#ifdef _MSC_VER
+#pragma warning (pop)
+#endif
