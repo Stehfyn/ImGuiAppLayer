@@ -221,18 +221,16 @@ template <typename ControlData, typename TempData, typename... DataDependencies>
 struct ImGuiControlAdapter : ImGuiControlBase, ImGuiControlAdapterBase<ControlData, TempData, DataDependencies...>
 {
     // Instance data for this control, created and stored in ImGuiApp::Data by PushAppControl<>(), and accessible from _InstanceData
-    mutable struct InstanceData 
+    mutable struct InstanceData
     {
       ControlData ControlData;
       TempData    LastTempData;
       TempData    TempData;
     } *_InstanceData;
 
-    //
-    //
-    //
-    //
-    template <typename T> inline T* GetData(const ImGuiApp* app) const { T* data; data = static_cast<T*>(app->Data.GetVoidPtr(ImGuiType<T>::ID)); IM_ASSERT(data); return static_cast<T*>(data); }
+    // If you assert here, it means that either this control's _InstanceData was not allocated and inserted into ImGuiApp::Data (performed by PushAppControl<>()) or
+    // a defined DataDependency was not properly pushed before this control (also performed by PushAppControl<>() for each dependency).
+    template <typename T> inline T* GetData(const ImGuiApp* app) const { T* data = static_cast<T*>(app->Data.GetVoidPtr(ImGuiType<T>::ID)); IM_ASSERT(data); return static_cast<T*>(data); }
     inline std::tuple<DataDependencies*...> GetAllDependencyData(const ImGuiApp* app) const { return { GetData<DataDependencies>(app)... }; }
 
     //
@@ -240,10 +238,9 @@ struct ImGuiControlAdapter : ImGuiControlBase, ImGuiControlAdapterBase<ControlDa
     //
     //
     virtual void OnInitialize(ImGuiApp*, ControlData*, const DataDependencies*...) const override {}
-    virtual void OnInitialize(ImGuiApp* app) override final
+    virtual void OnInitialize(ImGuiApp* app) const override final
     {
-      _InstanceData = GetData<InstanceData>(app);
-      IM_ASSERT(_InstanceData); // Cache pointer to instance data
+      _InstanceData = reinterpret_cast<InstanceData*>(GetData<ControlData>(app)); // Cache pointer to instance data
       std::apply([=](DataDependencies*... dependencies) { OnInitialize(app, &_InstanceData->ControlData, dependencies...); }, GetAllDependencyData(app));
     }
 
@@ -293,6 +290,7 @@ struct ImGuiControlAdapter : ImGuiControlBase, ImGuiControlAdapterBase<ControlDa
 template <typename ControlData, typename TempData, typename... DataDependencies>
 struct ImGuiControl : ImGuiControlAdapter<ControlData, TempData, DataDependencies...>
 {
+  using ControlDataType = ControlData;
   using ControlInstanceDataType = ImGuiControlAdapter<ControlData, TempData, DataDependencies...>::InstanceData;
 };
 
@@ -323,17 +321,20 @@ namespace ImGui
   inline void PushAppControl(ImGuiApp* app)
   {
       T* control;
-      typename T::ControlInstanceDataType* data;
+      typename T::ControlInstanceDataType* instance_data;
 
       IM_ASSERT(app);
+
+      instance_data = static_cast<decltype(instance_data)>(app->Data.GetVoidPtr(ImGuiType<typename T::ControlDataType>::ID));
+      IM_ASSERT(nullptr == instance_data); // Ensure we are not pushing a duplicate instance of this control type
 
       control = IM_NEW(T)();
       IM_ASSERT(control);
 
-      data = IM_NEW(typename T::ControlInstanceDataType)();
-      IM_ASSERT(data);
+      instance_data = IM_NEW(typename T::ControlInstanceDataType)();
+      IM_ASSERT(instance_data);
 
-      app->Data.SetVoidPtr(ImGuiType<typename T::ControlInstanceDataType>::ID, data);
+      app->Data.SetVoidPtr(ImGuiType<typename T::ControlDataType>::ID, instance_data);
       app->Controls.push_back(control);
       app->Controls.back()->OnInitialize(app);
   }
@@ -341,7 +342,7 @@ namespace ImGui
   inline void PopAppControl(ImGuiApp* app)
   {
       IM_ASSERT(app);
-      
+
       if (app->Controls.empty())
         return;
 
