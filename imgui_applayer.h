@@ -320,13 +320,18 @@ namespace ImGui
   template <typename T>
   inline void PushAppControl(ImGuiApp* app)
   {
+      ImGuiID id;
       T* control;
       typename T::ControlInstanceDataType* instance_data;
 
       IM_ASSERT(app);
 
-      instance_data = static_cast<decltype(instance_data)>(app->Data.GetVoidPtr(ImGuiType<typename T::ControlDataType>::ID));
-      IM_ASSERT(nullptr == instance_data); // Ensure we are not pushing a duplicate instance of this control type
+      // Use the control's data type hash for instance data storage/retrieval (so other controls which depend on instance_data->ControlData may access it)
+      id = ImGuiType<typename T::ControlDataType>::ID;
+
+      // Ensure we are not pushing a duplicate instance of this control data type
+      instance_data = static_cast<decltype(instance_data)>(app->Data.GetVoidPtr(id));
+      IM_ASSERT(nullptr == instance_data);
 
       control = IM_NEW(T)();
       IM_ASSERT(control);
@@ -334,7 +339,7 @@ namespace ImGui
       instance_data = IM_NEW(typename T::ControlInstanceDataType)();
       IM_ASSERT(instance_data);
 
-      app->Data.SetVoidPtr(ImGuiType<typename T::ControlDataType>::ID, instance_data);
+      app->Data.SetVoidPtr(id, instance_data);
       app->Controls.push_back(control);
       app->Controls.back()->OnInitialize(app);
   }

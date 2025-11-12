@@ -157,7 +157,7 @@ namespace
         ImRect r;
         ImVec2 pos;
         ImVec2 size = ImVec2(ImGui::GetContentRegionAvail().x, 2.0f * ImGui::GetFrameHeight());
-        
+
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, data->col);
         ImGui::Button("Hover Me!", size);
         temp_data->hovered = ImGui::IsItemHovered();
