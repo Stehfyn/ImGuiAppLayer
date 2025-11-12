@@ -240,9 +240,10 @@ struct ImGuiControlAdapter : ImGuiControlBase, ImGuiControlAdapterBase<ControlDa
     //
     //
     virtual void OnInitialize(ImGuiApp*, ControlData*, const DataDependencies*...) const override {}
-    virtual void OnInitialize(ImGuiApp* app) const override final
+    virtual void OnInitialize(ImGuiApp* app) override final
     {
-      IM_ASSERT(_InstanceData = GetData<InstanceData>(app)); // Cache pointer to instance data
+      _InstanceData = GetData<InstanceData>(app);
+      IM_ASSERT(_InstanceData); // Cache pointer to instance data
       std::apply([=](DataDependencies*... dependencies) { OnInitialize(app, &_InstanceData->ControlData, dependencies...); }, GetAllDependencyData(app));
     }
 
