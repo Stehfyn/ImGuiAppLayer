@@ -97,12 +97,11 @@ enum ImGuiAppCommandPrivate
 template <typename T>
 struct ImGuiStatic
 {
-  inline static constexpr const char*      FunctionSignature()               { return ImFuncSig; }
-  inline static constexpr std::string_view ParseType(std::string_view sv)    { size_t end = sv.rfind(ImParseTypeEnd); size_t start = sv.substr(0, end).rfind(ImParseTypeStart); return (sv.size() > end) && (end >= (start + 2)) ? sv.substr(start + 2, end - (start + 1)) : sv; }
-  inline static constexpr std::string_view MakeTypeName()                    { return ParseType(FunctionSignature()); }
-  inline static constexpr ImGuiID          ConstantHash(std::string_view sv) { return *sv.data() ? static_cast<ImGuiID>(*sv.data()) + 33 * ConstantHash(sv.data() + 1) : 5381; }
-  static constexpr        std::string_view Name                              { MakeTypeName() };
-  static constexpr        ImGuiID          ID                                { ConstantHash(MakeTypeName()) };
+  inline static constexpr const char*      _FunctionSignature()                { return ImFuncSig; }
+  inline static constexpr std::string_view _ParseType(std::string_view sv)     { size_t end = sv.rfind(ImParseTypeEnd); size_t start = sv.substr(0, end).rfind(ImParseTypeStart); return (sv.size() > end) && (end >= (start + 2)) ? sv.substr(start + 2, end - (start + 1)) : sv; }
+  inline static constexpr ImGuiID          _ConstantHash(std::string_view sv)  { return *sv.data() ? static_cast<ImGuiID>(*sv.data()) + 33 * _ConstantHash(sv.data() + 1) : 5381; }
+  static constexpr        std::string_view Name                                { _ParseType(_FunctionSignature()) };
+  static constexpr        ImGuiID          ID                                  { _ConstantHash(Name) };
 };
 
 template <typename T>
