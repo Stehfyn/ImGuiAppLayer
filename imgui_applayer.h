@@ -317,9 +317,13 @@ namespace ImGui
       app->Layers.pop_back();
   }
 
+  // FIX-ME: Currently, PushAppControl only supports data dependencies from other controls. We should support data depndencies from arbitrary sources.
   template <typename T>
   inline void PushAppControl(ImGuiApp* app)
   {
+      //FIX-ME OPT: A generic "debug" control, for an arbitrary control, is simply the struct { T::ControlInstanceDataType DebugData; bool override; }
+      // We could optionally generate and push that automatically here if a debug mode is enabled. Reflection would enable type-specific interactive
+      // editing of the data, as well as allowing a per-member override ability.
       ImGuiID id;
       T* control;
       typename T::ControlInstanceDataType* instance_data;
