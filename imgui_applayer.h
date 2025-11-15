@@ -20,7 +20,9 @@ Index of this file:
 //-----------------------------------------------------------------------------
 
 #include "imgui.h" 										    // IMGUI_API, ImGuiID, ImGuiStorage, ImBitArray, ImGuiTextIndex, ImChunkStream
+#include "imgui_internal.h"               // ImStrncpy
 
+#include <mutex>                          // std::call_once
 #include <tuple>                          // 
 #include <type_traits>                    // 
 #include <string_view>                    // 
@@ -46,10 +48,16 @@ struct ImGuiAppTaskLayer;                 //
 struct ImGuiAppCommandLayer;              //
 
 // Forward declarations: ImGuiControl layer
-struct ImGuiControlBase;                  //
+struct ImGuiAppControlBase;                  //
 template <typename ControlData, typename TempData, typename... DataDependencies> struct ImGuiControlAdapterBase; //
 template <typename ControlData, typename TempData, typename... DataDependencies> struct ImGuiControlAdapter;     //
 template <typename ControlData, typename TempData, typename... DataDependencies> struct ImGuiControl;            //
+
+// Forward declarations: ImGuiAppWindow layer
+struct ImGuiAppWindowBase;                   //
+
+// Forward declarations: ImGuiAppSidebar layer
+struct ImGuiAppSidebarBase;                  //
 
 enum ImGuiAppCommand;
 
@@ -80,6 +88,7 @@ enum ImGuiAppCommandPrivate
 #ifndef ImParseTypeStart
 #ifdef _MSC_VER
 #define ImParseTypeStart "::"
+#define ImParseTypeStart2 " "
 #else
 #define ImParseTypeStart '='
 #endif 
@@ -98,14 +107,19 @@ template <typename T>
 struct ImGuiStatic
 {
   inline static constexpr const char*      _FunctionSignature()                { return ImFuncSig; }
-  inline static constexpr std::string_view _ParseType(std::string_view sv)     { size_t end = sv.rfind(ImParseTypeEnd); size_t start = sv.substr(0, end).rfind(ImParseTypeStart); return (sv.size() > end) && (end >= (start + 2)) ? sv.substr(start + 2, end - (start + 1)) : sv; }
+  inline static constexpr std::string_view _ParseType(std::string_view sv)     { size_t end = sv.rfind(ImParseTypeEnd); auto sv2 = sv.substr(0, end); size_t start = (sv2.rfind(ImParseTypeStart) > sv2.rfind(ImParseTypeStart2)) ? sv2.rfind(ImParseTypeStart) : sv2.rfind(ImParseTypeStart2); start = start >= end ? 0 : start;  return (sv.size() > end) && (end >= (start + 2)) ? sv.substr(start + 2, end - (start + 1)) : sv; }
   inline static constexpr ImGuiID          _ConstantHash(std::string_view sv)  { return *sv.data() ? static_cast<ImGuiID>(*sv.data()) + 33 * _ConstantHash(sv.data() + 1) : 5381; }
+  inline static           ImGuiID          GetRelativeID()                     { std::call_once(_Initialized, []() { Count = 1; }); return Count++; }
   static constexpr        std::string_view Name                                { _ParseType(_FunctionSignature()) };
   static constexpr        ImGuiID          ID                                  { _ConstantHash(Name) };
+  inline static           int              Count;
+  inline static           std::once_flag   _Initialized;
 };
 
 template <typename T>
 using ImGuiType = ImGuiStatic<std::remove_cvref_t<std::remove_pointer_t<T>>>;
+
+struct ImInterface { ImInterface() = default; protected: ~ImInterface() = default; };
 
 //-----------------------------------------------------------------------------
 // [SECTION] Dear ImGui end-user API functions
@@ -120,6 +134,10 @@ namespace ImGui
   IMGUI_API void RenderApp(const ImGuiApp* app);
 
   template <typename T>
+  inline void PushAppSidebar(ImGuiApp* app, ImGuiViewport* vp, ImGuiDir dir, float size = 0.0f, ImGuiWindowFlags flags = 0);
+  inline void PopAppSidebar(ImGuiApp* app);
+
+  template <typename T>
   IMGUI_API inline void PushAppLayer(ImGuiApp* app);
   IMGUI_API inline void PopAppLayer(ImGuiApp* app);
 
@@ -127,43 +145,68 @@ namespace ImGui
   IMGUI_API inline void PushAppControl(ImGuiApp* app);
   IMGUI_API inline void PopAppControl(ImGuiApp* app);
 
+  //template <typename T>
+  //IMGUI_API inline void PushWindowControl(ImGuiApp* app, ImGuiAppWindowBase* window);
+
+  template <typename T>
+  IMGUI_API inline void PushSidebarControl(ImGuiApp* app, ImGuiAppSidebarBase* sidebar);
+
   IMGUI_API void ShowAppLayerDemo();
 }
 
-struct ImGuiAppLayerBase
+struct ImGuiAppLayerBase : ImInterface
 {
-  virtual      ~ImGuiAppLayerBase()             = default;
   virtual void OnAttach(ImGuiApp*)        const = 0;
   virtual void OnDetach(ImGuiApp*)        const = 0;
   virtual void OnUpdate(ImGuiApp*, float) const = 0;
   virtual void OnRender(const ImGuiApp*)  const = 0;
-protected:
-               ImGuiAppLayerBase()              = default;
 };
 
-struct ImGuiControlBase
+struct ImGuiAppWindowBase : ImInterface
 {
-  virtual      ~ImGuiControlBase()                                   = default;
+  char Label[256];
+
+  virtual void OnInitialize(ImGuiApp*)                  = 0;
+  virtual void OnShutdown(ImGuiApp*)                   const = 0;
+  virtual void OnUpdate(const ImGuiApp* app, float dt) const = 0;
+  virtual void OnRender(const ImGuiApp*)               const = 0;
+};
+
+struct ImGuiAppSidebarBase : ImInterface
+{
+  char Label[256];
+  ImGuiWindow* Window;
+  ImGuiViewport* Viewport;
+  ImGuiDir DockDir;
+  float Size;
+  ImGuiWindowFlags Flags;
+  ImVector<ImGuiAppControlBase*> Controls;
+  virtual void OnInitialize(ImGuiApp*) = 0;
+
+  virtual void OnShutdown(ImGuiApp*)                   const = 0;
+  virtual void OnUpdate(const ImGuiApp* app, float dt) const = 0;
+  virtual void OnRender(const ImGuiApp*)               const = 0;
+  virtual void OnStylePush(const ImGuiApp*)            const = 0;
+  virtual void OnStylePop(const ImGuiApp*)             const = 0;
+};
+
+struct ImGuiAppControlBase : ImInterface
+{
   virtual void OnInitialize(ImGuiApp*)                         const = 0;
   virtual void OnShutdown(ImGuiApp*)                           const = 0;
   virtual void OnGetCommand(const ImGuiApp*, ImGuiAppCommand*) const = 0;
   virtual void OnUpdate(const ImGuiApp*, float)                const = 0;
   virtual void OnRender(const ImGuiApp*)                       const = 0;
-protected:
-               ImGuiControlBase()                                    = default;
 };
 
 template <typename ControlData, typename TempData, typename... DataDependencies>
-struct ImGuiControlAdapterBase
+struct ImGuiControlAdapterBase : ImInterface
 {
-  virtual      ~ImGuiControlAdapterBase()                                                                                             = default;
   virtual void OnInitialize(ImGuiApp*, ControlData*, const DataDependencies*...)                                                const = 0;
   virtual void OnShutdown(ImGuiApp*, ControlData*, const DataDependencies*...)                                                  const = 0;
   virtual void OnGetCommand(const ImGuiApp*, ImGuiAppCommand*, const ControlData*, const TempData*, const DataDependencies*...) const = 0;
   virtual void OnUpdate(float, ControlData*, const TempData*, const TempData*, const DataDependencies*...)                      const = 0;
   virtual void OnRender(const ControlData*, TempData*, const DataDependencies*...)                                              const = 0;
-protected:
-               ImGuiControlAdapterBase()                                                                                              = default;
 };
 
 struct ImGuiAppLayer : ImGuiAppLayerBase
@@ -198,27 +241,33 @@ struct ImGuiAppStatusLayer : ImGuiAppLayer
   virtual void OnRender(const ImGuiApp*)  const override final;
 };
 
-struct ImGuiAppBase
+struct ImGuiAppWindowLayer : ImGuiAppLayer
+{
+  virtual void OnAttach(ImGuiApp*)        const override final;
+  virtual void OnDetach(ImGuiApp*)        const override final;
+  virtual void OnUpdate(ImGuiApp*, float) const override final;
+  virtual void OnRender(const ImGuiApp*)  const override final;
+};
+
+struct ImGuiAppBase : ImInterface
 {
   virtual void OnExecuteCommand(ImGuiAppCommand cmd) = 0;
-
-  virtual ~ImGuiAppBase() = default;
-protected:
-  ImGuiAppBase() = default;
 };
 
 struct ImGuiApp : ImGuiAppBase
 {
   ImGuiStorage Data;
-  ImVector<ImGuiControlBase*> Controls;
   ImVector<ImGuiAppLayerBase*> Layers;
+  ImVector<ImGuiAppWindowBase*> Windows;
+  ImVector<ImGuiAppSidebarBase*> Sidebars;
+  ImVector<ImGuiAppControlBase*> Controls;
 
   virtual void OnExecuteCommand(ImGuiAppCommand cmd) override;
   bool ShutdownPending;
 };
 
 template <typename ControlData, typename TempData, typename... DataDependencies>
-struct ImGuiControlAdapter : ImGuiControlBase, ImGuiControlAdapterBase<ControlData, TempData, DataDependencies...>
+struct ImGuiControlAdapter : ImGuiAppControlBase, ImGuiControlAdapterBase<ControlData, TempData, DataDependencies...>
 {
     // Instance data for this control, created and stored in ImGuiApp::Data by PushAppControl<>(), and accessible from _InstanceData
     mutable struct InstanceData
@@ -294,6 +343,33 @@ struct ImGuiControl : ImGuiControlAdapter<ControlData, TempData, DataDependencie
   using ControlInstanceDataType = ImGuiControlAdapter<ControlData, TempData, DataDependencies...>::InstanceData;
 };
 
+template <typename T>
+struct ImGuiAppWindow : ImGuiAppWindowBase
+{
+  ImVector<ImGuiAppControlBase*> Controls;
+
+  ImGuiAppWindow() { char type[256]; std::string_view sv = ImGuiType<T>::Name; ImStrncpy((char*)type, sv.data(), sv.length()); ImFormatString(Label, sizeof(Label), "%s##%d", type, ImGuiType<T>::GetRelativeID()); }
+
+  virtual void OnInitialize(ImGuiApp*) {}
+  virtual void OnShutdown(ImGuiApp*) const {}
+  virtual void OnRender(const ImGuiApp*) const {}
+  virtual void OnUpdate(const ImGuiApp* app, float dt) const {}
+};
+
+template <typename T>
+struct ImGuiAppSidebar : ImGuiAppSidebarBase
+{
+
+  ImGuiAppSidebar() { char type[256]; std::string_view sv = ImGuiType<T>::Name; ImStrncpy((char*)type, sv.data(), sv.length()); ImFormatString(Label, sizeof(Label), "%s##%d", type, ImGuiType<T>::GetRelativeID()); }
+
+  virtual void OnInitialize(ImGuiApp*) {}
+  virtual void OnShutdown(ImGuiApp*) const {}
+  virtual void OnUpdate(const ImGuiApp* app, float dt) const {}
+  virtual void OnRender(const ImGuiApp*) const {}
+  virtual void OnStylePush(const ImGuiApp*) const override {}
+  virtual void OnStylePop(const ImGuiApp*)  const override {}
+};
+
 namespace ImGui
 {
   template <typename T>
@@ -317,13 +393,48 @@ namespace ImGui
       app->Layers.pop_back();
   }
 
-  // FIX-ME: Currently, PushAppControl only supports data dependencies from other controls. We should support data depndencies from arbitrary sources.
+  template <typename T>
+  inline void PushAppWindow(ImGuiApp* app)
+  {
+    IM_ASSERT(app);
+    T* window = IM_NEW(T)();
+    IM_ASSERT(window);
+    app->Windows.push_back(window);
+    app->Windows.back()->OnInitialize(app);
+  }
+
+  inline void PopAppWindow(ImGuiApp* app)
+  {
+    IM_ASSERT(app);
+  }
+
+  template <typename T>
+  inline void PushAppSidebar(ImGuiApp* app, ImGuiViewport* vp, ImGuiDir dir, float size, ImGuiWindowFlags flags)
+  {
+    IM_ASSERT(app);
+    T* sidebar = IM_NEW(T)();
+    IM_ASSERT(sidebar);
+    sidebar->Viewport = vp;
+    sidebar->DockDir = dir;
+    sidebar->Size = size;
+    sidebar->Flags = flags;
+    app->Sidebars.push_back(sidebar);
+    app->Sidebars.back()->OnInitialize(app);
+  }
+
+  inline void PopAppSidebar(ImGuiApp* app)
+  {
+    IM_ASSERT(app);
+
+    if (app->Sidebars.empty())
+      return;
+    app->Sidebars.back()->OnShutdown(app);
+    app->Sidebars.pop_back();
+  }
+
   template <typename T>
   inline void PushAppControl(ImGuiApp* app)
   {
-      //FIX-ME OPT: A generic "debug" control, for an arbitrary control, is simply the struct { T::ControlInstanceDataType DebugData; bool override; }
-      // We could optionally generate and push that automatically here if a debug mode is enabled. Reflection would enable type-specific interactive
-      // editing of the data, as well as allowing a per-member override ability.
       ImGuiID id;
       T* control;
       typename T::ControlInstanceDataType* instance_data;
@@ -357,6 +468,60 @@ namespace ImGui
 
       app->Controls.back()->OnShutdown(app);
       app->Controls.pop_back();
+  }
+
+  //template <typename T>
+  //IMGUI_API void PushWindowControl(ImGuiApp* app, ImGuiAppWindowBase* window)
+  //{
+  //    ImGuiID id;
+  //    T* control;
+  //    typename T::ControlInstanceDataType* instance_data;
+  //
+  //    IM_ASSERT(app);
+  //
+  //    // Use the control's data type hash for instance data storage/retrieval (so other controls which depend on instance_data->ControlData may access it)
+  //    id = ImGuiType<typename T::ControlDataType>::ID;
+  //
+  //    // Ensure we are not pushing a duplicate instance of this control data type
+  //    instance_data = static_cast<decltype(instance_data)>(app->Data.GetVoidPtr(id));
+  //    IM_ASSERT(nullptr == instance_data);
+  //
+  //    control = IM_NEW(T)();
+  //    IM_ASSERT(control);
+  //
+  //    instance_data = IM_NEW(typename T::ControlInstanceDataType)();
+  //    IM_ASSERT(instance_data);
+  //
+  //    app->Data.SetVoidPtr(id, instance_data);
+  //    window->Controls.push_back(control);
+  //    window->Controls.back()->OnInitialize(app);
+  //}
+
+  template <typename T>
+  IMGUI_API inline void PushSidebarControl(ImGuiApp* app, ImGuiAppSidebarBase* sidebar)
+  {
+      ImGuiID id;
+      T* control;
+      typename T::ControlInstanceDataType* instance_data;
+
+      IM_ASSERT(app);
+
+      // Use the control's data type hash for instance data storage/retrieval (so other controls which depend on instance_data->ControlData may access it)
+      id = ImGuiType<typename T::ControlDataType>::ID;
+
+      // Ensure we are not pushing a duplicate instance of this control data type
+      instance_data = static_cast<decltype(instance_data)>(app->Data.GetVoidPtr(id));
+      IM_ASSERT(nullptr == instance_data);
+
+      control = IM_NEW(T)();
+      IM_ASSERT(control);
+
+      instance_data = IM_NEW(typename T::ControlInstanceDataType)();
+      IM_ASSERT(instance_data);
+
+      app->Data.SetVoidPtr(id, instance_data);
+      sidebar->Controls.push_back(control);
+      sidebar->Controls.back()->OnInitialize(app);
   }
 }
 
