@@ -375,7 +375,7 @@ namespace
     virtual void OnUpdate(float, DebugUruguaaaayyyBarData* data, const DebugBarTempDataaaaaaaaa* temp_data, const DebugBarTempDataaaaaaaaa* last_temp_data) const override final
     {
       IM_UNUSED(last_temp_data);
-      data->idx = 1 >= temp_data->idx ? ImClamp(data->idx, 1, 1 << (data->callbacks.size() + 1)) : temp_data->idx;
+      data->idx = temp_data->idx;
     }
 
 
@@ -387,15 +387,15 @@ namespace
       static const auto get_width = [](const char* str) -> float { return ImGui::CalcTextSize(str).x + 2.0f * ImGui::GetStyle().FramePadding.x; };
 
       ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
-      temp_data->idx = data->idx;
+      temp_data->idx = 0 | data->idx;
       ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(((1 << 1) & data->idx) ? ImGuiCol_ButtonActive : ImGuiCol_Button));
-      temp_data->idx ^= (1 << (1 * ImGui::Button("Debug", ImVec2(get_width("Debug"), ImGui::GetFrameHeightWithSpacing())))) * ImGui::IsItemClicked(); ImGui::PopStyleColor(); ImGui::SameLine();
+      temp_data->idx ^= (1 << 1) * ImGui::Button("Debug", ImVec2(get_width("Debug"), ImGui::GetFrameHeightWithSpacing())); ImGui::PopStyleColor(); ImGui::SameLine();
       ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical); ImGui::SameLine();
       ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(((1 << 2) & data->idx) ? ImGuiCol_ButtonActive : ImGuiCol_Button));
-      temp_data->idx ^= (1 << (2 * ImGui::Button("Style", ImVec2(get_width("Style"), ImGui::GetFrameHeightWithSpacing())))) * ImGui::IsItemClicked(); ImGui::PopStyleColor(); ImGui::SameLine();
+      temp_data->idx ^= (1 << 2) * ImGui::Button("Style", ImVec2(get_width("Style"), ImGui::GetFrameHeightWithSpacing())); ImGui::PopStyleColor(); ImGui::SameLine();
       ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical); ImGui::SameLine();
       ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(((1 << 3) & data->idx) ? ImGuiCol_ButtonActive : ImGuiCol_Button));
-      temp_data->idx ^= (1 << (3 * ImGui::Button("About", ImVec2(get_width("About"), ImGui::GetFrameHeightWithSpacing())))) * ImGui::IsItemClicked(); ImGui::PopStyleColor(); ImGui::SameLine();
+      temp_data->idx ^= (1 << 3) * ImGui::Button("About", ImVec2(get_width("About"), ImGui::GetFrameHeightWithSpacing())); ImGui::PopStyleColor(); ImGui::SameLine();
       ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical); ImGui::SameLine();
       ImGuiIO& io = ImGui::GetIO();
       char buf[128];
