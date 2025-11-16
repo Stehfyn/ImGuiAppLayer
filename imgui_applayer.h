@@ -121,6 +121,18 @@ using ImGuiType = ImGuiStatic<std::remove_cvref_t<std::remove_pointer_t<T>>>;
 
 struct ImInterface { ImInterface() = default; protected: ~ImInterface() = default; };
 
+struct ImGuiColorModEx
+{
+  ImGuiColorMod ColorMod;
+  bool          Active;
+};
+
+struct ImGuiStyleModEx
+{
+  ImGuiStyleMod StyleMod;
+  bool          Active;
+};
+
 //-----------------------------------------------------------------------------
 // [SECTION] Dear ImGui end-user API functions
 // (Note that ImGui:: being a namespace, you can add extra ImGui:: functions in your own separate file. Please don't modify imgui source files!)
@@ -181,6 +193,8 @@ struct ImGuiAppSidebarBase : ImInterface
   float Size;
   ImGuiWindowFlags Flags;
   ImVector<ImGuiAppControlBase*> Controls;
+  ImVector<ImGuiStyleModEx> StyleMods;
+  ImVector<ImGuiColorModEx> ColorMods;
   virtual void OnInitialize(ImGuiApp*) = 0;
 
   virtual void OnShutdown(ImGuiApp*)                   const = 0;
