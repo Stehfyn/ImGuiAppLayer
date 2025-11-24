@@ -47,11 +47,11 @@ struct ImGuiAppLayer;                     //
 struct ImGuiAppTaskLayer;                 //
 struct ImGuiAppCommandLayer;              //
 
-// Forward declarations: ImGuiControl layer
+// Forward declarations: ImGuiAppControl layer
 struct ImGuiAppControlBase;                  //
-template <typename ControlData, typename TempData, typename... DataDependencies> struct ImGuiControlAdapterBase; //
-template <typename ControlData, typename TempData, typename... DataDependencies> struct ImGuiControlAdapter;     //
-template <typename ControlData, typename TempData, typename... DataDependencies> struct ImGuiControl;            //
+template <typename PersistData, typename TempData, typename... DataDependencies>                struct ImGuiInterfaceAdapterBase; //
+template <typename Base, typename PersistData, typename TempData, typename... DataDependencies> struct ImGuiInterfaceAdapter;     //
+template <typename PersistData, typename TempData, typename... DataDependencies> struct ImGuiAppControl;            //
 
 // Forward declarations: ImGuiAppWindow layer
 struct ImGuiAppWindowBase;                   //
@@ -85,6 +85,10 @@ enum ImGuiAppCommandPrivate
 #endif 
 #endif 
 
+#ifndef IM_LABEL_SIZE
+#define IM_LABEL_SIZE 256
+#endif 
+
 #ifndef ImParseTypeStart
 #ifdef _MSC_VER
 #define ImParseTypeStart "::"
@@ -103,6 +107,8 @@ enum ImGuiAppCommandPrivate
 #endif 
 
 
+struct ImGuiInterface { char Label[IM_LABEL_SIZE]; ImGuiInterface() = default; protected: ~ImGuiInterface() = default; };
+
 template <typename T>
 struct ImGuiStatic
 {
@@ -119,7 +125,10 @@ struct ImGuiStatic
 template <typename T>
 using ImGuiType = ImGuiStatic<std::remove_cvref_t<std::remove_pointer_t<T>>>;
 
-struct ImInterface { ImInterface() = default; protected: ~ImInterface() = default; };
+template <typename T>
+inline static void GenerateLabel(char* label, size_t size) { std::string_view sv = ImGuiType<T>::Name; IM_ASSERT(sv.length() < sizeof(size)); ImStrncpy(label, sv.data(), sv.size()); }
+template <typename T>
+inline static void GenerateUniqueLabel(char* label, size_t size) { char type[256]; std::string_view sv = ImGuiType<T>::Name; ImStrncpy((char*)type, sv.data(), sv.size()); ImFormatString(label, size, "%s##%d", type, ImGuiType<T>::GetRelativeID()); }
 
 struct ImGuiColorModEx
 {
@@ -166,7 +175,7 @@ namespace ImGui
   IMGUI_API void ShowAppLayerDemo();
 }
 
-struct ImGuiAppLayerBase : ImInterface
+struct ImGuiAppLayerBase : ImGuiInterface
 {
   virtual void OnAttach(ImGuiApp*)        const = 0;
   virtual void OnDetach(ImGuiApp*)        const = 0;
@@ -174,53 +183,46 @@ struct ImGuiAppLayerBase : ImInterface
   virtual void OnRender(const ImGuiApp*)  const = 0;
 };
 
-struct ImGuiAppWindowBase : ImInterface
+struct ImGuiAppItemBase : ImGuiInterface
 {
-  char Label[256];
-
-  virtual void OnInitialize(ImGuiApp*)                  = 0;
+  virtual void OnInitialize(ImGuiApp*)                 const = 0;
   virtual void OnShutdown(ImGuiApp*)                   const = 0;
-  virtual void OnUpdate(const ImGuiApp* app, float dt) const = 0;
-  virtual void OnRender(const ImGuiApp*)               const = 0;
-};
-
-struct ImGuiAppSidebarBase : ImInterface
-{
-  char Label[256];
-  ImGuiWindow* Window;
-  ImGuiViewport* Viewport;
-  ImGuiDir DockDir;
-  float Size;
-  ImGuiWindowFlags Flags;
-  ImVector<ImGuiAppControlBase*> Controls;
-  ImVector<ImGuiStyleModEx> StyleMods;
-  ImVector<ImGuiColorModEx> ColorMods;
-  virtual void OnInitialize(ImGuiApp*) = 0;
-
-  virtual void OnShutdown(ImGuiApp*)                   const = 0;
+  virtual void OnGetCommand(const ImGuiApp*, ImGuiAppCommand*) const = 0;
   virtual void OnUpdate(const ImGuiApp* app, float dt) const = 0;
   virtual void OnRender(const ImGuiApp*)               const = 0;
   virtual void OnStylePush(const ImGuiApp*)            const = 0;
   virtual void OnStylePop(const ImGuiApp*)             const = 0;
 };
 
-struct ImGuiAppControlBase : ImInterface
+struct ImGuiAppWindowBase : ImGuiAppItemBase
 {
-  virtual void OnInitialize(ImGuiApp*)                         const = 0;
-  virtual void OnShutdown(ImGuiApp*)                           const = 0;
-  virtual void OnGetCommand(const ImGuiApp*, ImGuiAppCommand*) const = 0;
-  virtual void OnUpdate(const ImGuiApp*, float)                const = 0;
-  virtual void OnRender(const ImGuiApp*)                       const = 0;
+	bool Open;
+  ImGuiWindow* Window;
+  ImGuiViewport* Viewport;
+  ImGuiWindowFlags Flags;
+  ImVector<ImGuiAppControlBase*> Controls;
+  ImVector<ImGuiStyleModEx> StyleMods;
+  ImVector<ImGuiColorModEx> ColorMods;
 };
 
-template <typename ControlData, typename TempData, typename... DataDependencies>
-struct ImGuiControlAdapterBase : ImInterface
+struct ImGuiAppSidebarBase : ImGuiAppWindowBase
 {
-  virtual void OnInitialize(ImGuiApp*, ControlData*, const DataDependencies*...)                                                const = 0;
-  virtual void OnShutdown(ImGuiApp*, ControlData*, const DataDependencies*...)                                                  const = 0;
-  virtual void OnGetCommand(const ImGuiApp*, ImGuiAppCommand*, const ControlData*, const TempData*, const DataDependencies*...) const = 0;
-  virtual void OnUpdate(float, ControlData*, const TempData*, const TempData*, const DataDependencies*...)                      const = 0;
-  virtual void OnRender(const ControlData*, TempData*, const DataDependencies*...)                                              const = 0;
+  ImGuiDir DockDir;
+  float    Size;
+};
+
+struct ImGuiAppControlBase : ImGuiAppItemBase
+{
+};
+
+template <typename PersistData, typename TempData, typename... DataDependencies>
+struct ImGuiInterfaceAdapterBase : ImGuiInterface
+{
+  virtual void OnInitialize(ImGuiApp*, PersistData*, const DataDependencies*...)                                                const = 0;
+  virtual void OnShutdown(ImGuiApp*, PersistData*, const DataDependencies*...)                                                  const = 0;
+  virtual void OnGetCommand(const ImGuiApp*, ImGuiAppCommand*, const PersistData*, const TempData*, const DataDependencies*...) const = 0;
+  virtual void OnUpdate(float, PersistData*, const TempData*, const TempData*, const DataDependencies*...)                      const = 0;
+  virtual void OnRender(const PersistData*, TempData*, const DataDependencies*...)                                              const = 0;
 };
 
 struct ImGuiAppLayer : ImGuiAppLayerBase
@@ -263,30 +265,29 @@ struct ImGuiAppWindowLayer : ImGuiAppLayer
   virtual void OnRender(const ImGuiApp*)  const override final;
 };
 
-struct ImGuiAppBase : ImInterface
+struct ImGuiAppBase : ImGuiInterface
 {
   virtual void OnExecuteCommand(ImGuiAppCommand cmd) = 0;
+  bool ShutdownPending;
 };
 
 struct ImGuiApp : ImGuiAppBase
 {
-  ImGuiStorage Data;
-  ImVector<ImGuiAppLayerBase*> Layers;
-  ImVector<ImGuiAppWindowBase*> Windows;
+  ImGuiStorage                   Data;
+  ImVector<ImGuiAppLayerBase*>   Layers;
+  ImVector<ImGuiAppWindowBase*>  Windows;
   ImVector<ImGuiAppSidebarBase*> Sidebars;
-  ImVector<ImGuiAppControlBase*> Controls;
 
   virtual void OnExecuteCommand(ImGuiAppCommand cmd) override;
-  bool ShutdownPending;
 };
 
-template <typename ControlData, typename TempData, typename... DataDependencies>
-struct ImGuiControlAdapter : ImGuiAppControlBase, ImGuiControlAdapterBase<ControlData, TempData, DataDependencies...>
+template <typename Base, typename PersistData, typename TempData, typename... DataDependencies>
+struct ImGuiInterfaceAdapter : Base, ImGuiInterfaceAdapterBase<PersistData, TempData, DataDependencies...>
 {
     // Instance data for this control, created and stored in ImGuiApp::Data by PushAppControl<>(), and accessible from _InstanceData
     mutable struct InstanceData
     {
-      ControlData ControlData;
+      PersistData PersistData;
       TempData    LastTempData;
       TempData    TempData;
     } *_InstanceData;
@@ -300,41 +301,41 @@ struct ImGuiControlAdapter : ImGuiAppControlBase, ImGuiControlAdapterBase<Contro
     //
     //
     //
-    virtual void OnInitialize(ImGuiApp*, ControlData*, const DataDependencies*...) const override {}
+    virtual void OnInitialize(ImGuiApp*, PersistData*, const DataDependencies*...) const override {}
     virtual void OnInitialize(ImGuiApp* app) const override final
     {
-      _InstanceData = reinterpret_cast<InstanceData*>(GetData<ControlData>(app)); // Cache pointer to instance data
-      std::apply([=](DataDependencies*... dependencies) { OnInitialize(app, &_InstanceData->ControlData, dependencies...); }, GetAllDependencyData(app));
+      _InstanceData = reinterpret_cast<InstanceData*>(GetData<PersistData>(app)); // Cache pointer to instance data
+      std::apply([=](DataDependencies*... dependencies) { OnInitialize(app, &_InstanceData->PersistData, dependencies...); }, GetAllDependencyData(app));
     }
 
     //
     //
     //
     //
-    virtual void OnShutdown(ImGuiApp*, ControlData*, const DataDependencies*...) const override {}
+    virtual void OnShutdown(ImGuiApp*, PersistData*, const DataDependencies*...) const override {}
     virtual void OnShutdown(ImGuiApp* app) const override final
     {
-      std::apply([=](DataDependencies*... dependencies) { OnShutdown(app, &_InstanceData->ControlData, dependencies...); }, GetAllDependencyData(app));
+      std::apply([=](DataDependencies*... dependencies) { OnShutdown(app, &_InstanceData->PersistData, dependencies...); }, GetAllDependencyData(app));
     }
 
     //
     //
     //
     //
-    virtual void OnGetCommand(const ImGuiApp*, ImGuiAppCommand*, const ControlData*, const TempData*, const DataDependencies*...) const override {}
+    virtual void OnGetCommand(const ImGuiApp*, ImGuiAppCommand*, const PersistData*, const TempData*, const DataDependencies*...) const override {}
     virtual void OnGetCommand(const ImGuiApp* app, ImGuiAppCommand* cmd) const override final
     {
-      std::apply([=](DataDependencies*... dependencies) { OnGetCommand(app, cmd, &_InstanceData->ControlData, &_InstanceData->TempData, dependencies...); }, GetAllDependencyData(app));
+      std::apply([=](DataDependencies*... dependencies) { OnGetCommand(app, cmd, &_InstanceData->PersistData, &_InstanceData->TempData, dependencies...); }, GetAllDependencyData(app));
     }
 
     //
     //
     //
     //
-    virtual void OnUpdate(float, ControlData*, const TempData*, const TempData*, const DataDependencies*...) const override {}
+    virtual void OnUpdate(float, PersistData*, const TempData*, const TempData*, const DataDependencies*...) const override {}
     virtual void OnUpdate(const ImGuiApp* app, float dt) const override final
     {
-      std::apply([=](DataDependencies*... dependencies) { OnUpdate(dt, &_InstanceData->ControlData, &_InstanceData->TempData, &_InstanceData->LastTempData, dependencies...); }, GetAllDependencyData(app));
+      std::apply([=](DataDependencies*... dependencies) { OnUpdate(dt, &_InstanceData->PersistData, &_InstanceData->TempData, &_InstanceData->LastTempData, dependencies...); }, GetAllDependencyData(app));
       _InstanceData->LastTempData = _InstanceData->TempData;
     }
 
@@ -342,46 +343,47 @@ struct ImGuiControlAdapter : ImGuiAppControlBase, ImGuiControlAdapterBase<Contro
     //
     //
     //
-    virtual void OnRender(const ControlData*, TempData*, const DataDependencies*...) const override {}
+    virtual void OnRender(const PersistData*, TempData*, const DataDependencies*...) const override {}
     virtual void OnRender(const ImGuiApp* app) const override final
     {
       _InstanceData->TempData = {};
-      std::apply([=](DataDependencies*... dependencies) { OnRender(&_InstanceData->ControlData, &_InstanceData->TempData, dependencies...); }, GetAllDependencyData(app));
+      std::apply([=](DataDependencies*... dependencies) { OnRender(&_InstanceData->PersistData, &_InstanceData->TempData, dependencies...); }, GetAllDependencyData(app));
     }
 };
 
-template <typename ControlData, typename TempData, typename... DataDependencies>
-struct ImGuiControl : ImGuiControlAdapter<ControlData, TempData, DataDependencies...>
+template <typename PersistData, typename TempData, typename... DataDependencies>
+struct ImGuiAppControl : ImGuiInterfaceAdapter<ImGuiAppControlBase, PersistData, TempData, DataDependencies...>
 {
-  using ControlDataType = ControlData;
-  using ControlInstanceDataType = ImGuiControlAdapter<ControlData, TempData, DataDependencies...>::InstanceData;
+  using ControlDataType = PersistData;
+  using ControlInstanceDataType = ImGuiInterfaceAdapter<ImGuiAppControlBase, PersistData, TempData, DataDependencies...>::InstanceData;
 };
 
 template <typename T>
 struct ImGuiAppWindow : ImGuiAppWindowBase
 {
-  ImVector<ImGuiAppControlBase*> Controls;
+  ImGuiAppWindow() { GenerateUniqueLabel<T>(this->Label, sizeof(this->Label)); }
 
-  ImGuiAppWindow() { char type[256]; std::string_view sv = ImGuiType<T>::Name; ImStrncpy((char*)type, sv.data(), sv.length()); ImFormatString(Label, sizeof(Label), "%s##%d", type, ImGuiType<T>::GetRelativeID()); }
-
-  virtual void OnInitialize(ImGuiApp*) {}
-  virtual void OnShutdown(ImGuiApp*) const {}
-  virtual void OnRender(const ImGuiApp*) const {}
-  virtual void OnUpdate(const ImGuiApp* app, float dt) const {}
+  virtual void OnInitialize(ImGuiApp*)                 const override {};
+  virtual void OnShutdown(ImGuiApp*)                   const override {};
+  virtual void OnGetCommand(const ImGuiApp*, ImGuiAppCommand*) const override {};
+  virtual void OnUpdate(const ImGuiApp* app, float dt) const override {};
+  virtual void OnRender(const ImGuiApp*)               const override {};
+  virtual void OnStylePush(const ImGuiApp*)            const override {};
+  virtual void OnStylePop(const ImGuiApp*)             const override {};
 };
 
 template <typename T>
 struct ImGuiAppSidebar : ImGuiAppSidebarBase
 {
+  ImGuiAppSidebar() { GenerateUniqueLabel<T>(this->Label, sizeof(this->Label)); }
 
-  ImGuiAppSidebar() { char type[256]; std::string_view sv = ImGuiType<T>::Name; ImStrncpy((char*)type, sv.data(), sv.length()); ImFormatString(Label, sizeof(Label), "%s##%d", type, ImGuiType<T>::GetRelativeID()); }
-
-  virtual void OnInitialize(ImGuiApp*) {}
-  virtual void OnShutdown(ImGuiApp*) const {}
-  virtual void OnUpdate(const ImGuiApp* app, float dt) const {}
-  virtual void OnRender(const ImGuiApp*) const {}
-  virtual void OnStylePush(const ImGuiApp*) const override {}
-  virtual void OnStylePop(const ImGuiApp*)  const override {}
+  virtual void OnInitialize(ImGuiApp*)                 const override {};
+  virtual void OnShutdown(ImGuiApp*)                   const override {};
+  virtual void OnGetCommand(const ImGuiApp*, ImGuiAppCommand*) const override {};
+  virtual void OnUpdate(const ImGuiApp* app, float dt) const override {};
+  virtual void OnRender(const ImGuiApp*)               const override {};
+  virtual void OnStylePush(const ImGuiApp*)            const override {};
+  virtual void OnStylePop(const ImGuiApp*)             const override {};
 };
 
 namespace ImGui
@@ -449,39 +451,39 @@ namespace ImGui
   template <typename T>
   inline void PushAppControl(ImGuiApp* app)
   {
-      ImGuiID id;
-      T* control;
-      typename T::ControlInstanceDataType* instance_data;
-
-      IM_ASSERT(app);
-
-      // Use the control's data type hash for instance data storage/retrieval (so other controls which depend on instance_data->ControlData may access it)
-      id = ImGuiType<typename T::ControlDataType>::ID;
-
-      // Ensure we are not pushing a duplicate instance of this control data type
-      instance_data = static_cast<decltype(instance_data)>(app->Data.GetVoidPtr(id));
-      IM_ASSERT(nullptr == instance_data);
-
-      control = IM_NEW(T)();
-      IM_ASSERT(control);
-
-      instance_data = IM_NEW(typename T::ControlInstanceDataType)();
-      IM_ASSERT(instance_data);
-
-      app->Data.SetVoidPtr(id, instance_data);
-      app->Controls.push_back(control);
-      app->Controls.back()->OnInitialize(app);
+  //    ImGuiID id;
+  //    T* control;
+  //    typename T::ControlInstanceDataType* instance_data;
+  //
+  //    IM_ASSERT(app);
+  //
+  //    // Use the control's data type hash for instance data storage/retrieval (so other controls which depend on instance_data->ControlData may access it)
+  //    id = ImGuiType<typename T::ControlDataType>::ID;
+  //
+  //    // Ensure we are not pushing a duplicate instance of this control data type
+  //    instance_data = static_cast<decltype(instance_data)>(app->Data.GetVoidPtr(id));
+  //    IM_ASSERT(nullptr == instance_data);
+  //
+  //    control = IM_NEW(T)();
+  //    IM_ASSERT(control);
+  //
+  //    instance_data = IM_NEW(typename T::ControlInstanceDataType)();
+  //    IM_ASSERT(instance_data);
+  //
+  //    app->Data.SetVoidPtr(id, instance_data);
+  //    app->Controls.push_back(control);
+  //    app->Controls.back()->OnInitialize(app);
   }
 
   inline void PopAppControl(ImGuiApp* app)
   {
       IM_ASSERT(app);
 
-      if (app->Controls.empty())
-        return;
-
-      app->Controls.back()->OnShutdown(app);
-      app->Controls.pop_back();
+      //if (app->Controls.empty())
+      //  return;
+      //
+      //app->Controls.back()->OnShutdown(app);
+      //app->Controls.pop_back();
   }
 
   //template <typename T>
