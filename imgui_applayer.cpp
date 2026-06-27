@@ -6,7 +6,54 @@
 
 void ImGuiApp::OnExecuteCommand(ImGuiAppCommand cmd)
 {
-    IM_UNUSED(cmd);
+    if (cmd == ImGuiAppCommand_Shutdown)
+        ShutdownPending = true;
+}
+
+bool ImGuiApp::Initialize(const ImGuiAppConfig* config)
+{
+    if (Initialized)
+        Shutdown();
+
+    ShutdownPending = false;
+    Platform = config != nullptr ? config->Platform : ImGuiAppPlatform();
+
+    if (Platform.Initialize != nullptr && !Platform.Initialize(this, Platform.UserData))
+    {
+        if (Platform.Shutdown != nullptr)
+            Platform.Shutdown(this, Platform.UserData);
+        Platform = ImGuiAppPlatform();
+        return false;
+    }
+
+    ImGui::InitializeApp(this);
+    Initialized = true;
+    return true;
+}
+
+void ImGuiApp::Shutdown()
+{
+    if (!Initialized && Layers.empty() && Windows.empty() && Sidebars.empty() && StorageEntries.empty() && Platform.Shutdown == nullptr)
+        return;
+
+    ImGui::ShutdownApp(this);
+
+    if (Platform.Shutdown != nullptr)
+        Platform.Shutdown(this, Platform.UserData);
+
+    Platform = ImGuiAppPlatform();
+    Initialized = false;
+    ShutdownPending = false;
+}
+
+void ImGuiApp::DrawFrame(ImGuiApp* app)
+{
+    IM_ASSERT(app != nullptr);
+    if (app == nullptr)
+        return;
+
+    ImGui::UpdateApp(app);
+    ImGui::RenderApp(app);
 }
 
 void ImGuiAppTaskLayer::OnAttach(ImGuiApp* app ) const
@@ -46,6 +93,7 @@ void ImGuiAppCommandLayer::OnUpdate(ImGuiApp* app, float dt) const
 
     ImGuiAppCommand cmd;
     ImBitArray<ImGuiAppCommand_COUNT> arr;
+    arr.ClearAllBits();
 
     //for (auto& control : app->Controls)
     //{
@@ -117,10 +165,10 @@ namespace
 
 void ImGuiAppWindowLayer::OnAttach(ImGuiApp* app) const
 {
-    ImGuiContext* ctx = ImGui::GetCurrentContext();
-    ImGuiContext& g = *ctx;
-
     IM_UNUSED(app);
+
+    if (ImGui::FindSettingsHandler("AppWindowLayer") != nullptr)
+        return;
 
     // Add .ini handle for persistent AppWindow layer data
     ImGuiSettingsHandler ini_handler;
@@ -132,7 +180,7 @@ void ImGuiAppWindowLayer::OnAttach(ImGuiApp* app) const
     ini_handler.ReadLineFn = AppWindowLayerSettingsHandler_ReadLine;
     ini_handler.ApplyAllFn = AppWindowLayerSettingsHandler_ApplyAll;
     ini_handler.WriteAllFn = AppWindowLayerSettingsHandler_WriteAll;
-    g.SettingsHandlers.push_back(ini_handler);
+    ImGui::AddSettingsHandler(&ini_handler);
 }
 
 void ImGuiAppWindowLayer::OnDetach(ImGuiApp* app) const
@@ -374,9 +422,55 @@ namespace
 
 namespace ImGui
 {
+  IMGUI_API void RegisterAppStorage(ImGuiApp* app, ImGuiID id, void* ptr, void (*destroy)(void*))
+  {
+      IM_ASSERT(app);
+      IM_ASSERT(id != 0);
+      IM_ASSERT(ptr != nullptr);
+      IM_ASSERT(destroy != nullptr);
+
+      if (app == nullptr || id == 0 || ptr == nullptr)
+        return;
+
+      for (const ImGuiAppStorageEntry& entry : app->StorageEntries)
+      {
+        IM_ASSERT(entry.ID != id && "ImGuiApp storage entry already registered.");
+        if (entry.ID == id)
+          return;
+      }
+
+      ImGuiAppStorageEntry entry;
+      entry.ID = id;
+      entry.Ptr = ptr;
+      entry.Destroy = destroy;
+      app->StorageEntries.push_back(entry);
+  }
+
+  IMGUI_API void ClearAppStorage(ImGuiApp* app)
+  {
+      IM_ASSERT(app);
+      if (app == nullptr)
+        return;
+
+      for (int i = app->StorageEntries.Size - 1; i >= 0; --i)
+      {
+        ImGuiAppStorageEntry& entry = app->StorageEntries[i];
+        if (entry.Destroy != nullptr && entry.Ptr != nullptr)
+          entry.Destroy(entry.Ptr);
+      }
+
+      app->StorageEntries.clear();
+      app->Data.Clear();
+  }
+
   IMGUI_API void InitializeApp(ImGuiApp* app)
   {
       IM_ASSERT(app);
+      IM_ASSERT(app->Layers.empty() && "ImGui app already has layers. ShutdownApp() before re-initializing.");
+      if (app == nullptr || !app->Layers.empty())
+        return;
+
+      app->ShutdownPending = false;
       PushAppLayer<ImGuiAppTaskLayer>(app);
       PushAppLayer<ImGuiAppCommandLayer>(app);
       PushAppLayer<ImGuiAppStatusLayer>(app);
@@ -386,9 +480,18 @@ namespace ImGui
   IMGUI_API void ShutdownApp(ImGuiApp* app)
   {
       IM_ASSERT(app);
+      if (app == nullptr)
+        return;
 
+      while (!app->Sidebars.empty())
+        PopAppSidebar(app);
+      while (!app->Windows.empty())
+        PopAppWindow(app);
       while (!app->Layers.empty())
         PopAppLayer(app);
+
+      ClearAppStorage(app);
+      app->ShutdownPending = false;
   }
 
   IMGUI_API void UpdateApp(ImGuiApp* app)

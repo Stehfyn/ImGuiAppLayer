@@ -21,6 +21,7 @@ Index of this file:
 
 #include "imgui.h" 										    // IMGUI_API, ImGuiID, ImGuiStorage, ImBitArray, ImGuiTextIndex, ImChunkStream
 #include "imgui_internal.h"               // ImStrncpy
+#include "imapp_config.h"
 
 #include <mutex>                          // std::call_once
 #include <tuple>                          // 
@@ -107,7 +108,7 @@ enum ImGuiAppCommandPrivate
 #endif 
 
 
-struct ImGuiInterface { char Label[IM_LABEL_SIZE]; ImGuiInterface() = default; protected: ~ImGuiInterface() = default; };
+struct ImGuiInterface { char Label[IM_LABEL_SIZE] = {}; ImGuiInterface() = default; virtual ~ImGuiInterface() = default; };
 
 template <typename T>
 struct ImGuiStatic
@@ -153,6 +154,8 @@ namespace ImGui
   IMGUI_API void ShutdownApp(ImGuiApp* app);
   IMGUI_API void UpdateApp(ImGuiApp* app);
   IMGUI_API void RenderApp(const ImGuiApp* app);
+  IMGUI_API void RegisterAppStorage(ImGuiApp* app, ImGuiID id, void* ptr, void (*destroy)(void*));
+  IMGUI_API void ClearAppStorage(ImGuiApp* app);
 
   template <typename T>
   inline void PushAppSidebar(ImGuiApp* app, ImGuiViewport* vp, ImGuiDir dir, float size = 0.0f, ImGuiWindowFlags flags = 0);
@@ -196,10 +199,10 @@ struct ImGuiAppItemBase : ImGuiInterface
 
 struct ImGuiAppWindowBase : ImGuiAppItemBase
 {
-	bool Open;
-  ImGuiWindow* Window;
-  ImGuiViewport* Viewport;
-  ImGuiWindowFlags Flags;
+	bool Open = true;
+  ImGuiWindow* Window = nullptr;
+  ImGuiViewport* Viewport = nullptr;
+  ImGuiWindowFlags Flags = ImGuiWindowFlags_None;
   ImVector<ImGuiAppControlBase*> Controls;
   ImVector<ImGuiStyleModEx> StyleMods;
   ImVector<ImGuiColorModEx> ColorMods;
@@ -207,8 +210,8 @@ struct ImGuiAppWindowBase : ImGuiAppItemBase
 
 struct ImGuiAppSidebarBase : ImGuiAppWindowBase
 {
-  ImGuiDir DockDir;
-  float    Size;
+  ImGuiDir DockDir = ImGuiDir_None;
+  float    Size = 0.0f;
 };
 
 struct ImGuiAppControlBase : ImGuiAppItemBase
@@ -268,16 +271,30 @@ struct ImGuiAppWindowLayer : ImGuiAppLayer
 struct ImGuiAppBase : ImGuiInterface
 {
   virtual void OnExecuteCommand(ImGuiAppCommand cmd) = 0;
-  bool ShutdownPending;
+  bool ShutdownPending = false;
+};
+
+struct ImGuiAppStorageEntry
+{
+  ImGuiID ID = 0;
+  void* Ptr = nullptr;
+  void (*Destroy)(void*) = nullptr;
 };
 
 struct ImGuiApp : ImGuiAppBase
 {
   ImGuiStorage                   Data;
+  ImVector<ImGuiAppStorageEntry> StorageEntries;
   ImVector<ImGuiAppLayerBase*>   Layers;
   ImVector<ImGuiAppWindowBase*>  Windows;
   ImVector<ImGuiAppSidebarBase*> Sidebars;
+  ImGuiAppPlatform               Platform;
+  bool                           Initialized = false;
 
+  bool Initialize(const ImGuiAppConfig* config = nullptr);
+  void Shutdown();
+  static void DrawFrame(ImGuiApp* app);
+  bool IsInitialized() const { return Initialized; }
   virtual void OnExecuteCommand(ImGuiAppCommand cmd) override;
 };
 
@@ -389,6 +406,25 @@ struct ImGuiAppSidebar : ImGuiAppSidebarBase
 namespace ImGui
 {
   template <typename T>
+  inline void DestroyAppStorageValue(void* ptr)
+  {
+      IM_DELETE(static_cast<T*>(ptr));
+  }
+
+  inline void ShutdownAppControls(ImGuiApp* app, ImVector<ImGuiAppControlBase*>& controls)
+  {
+      IM_ASSERT(app);
+
+      while (!controls.empty())
+      {
+        ImGuiAppControlBase* control = controls.back();
+        controls.pop_back();
+        control->OnShutdown(app);
+        IM_DELETE(control);
+      }
+  }
+
+  template <typename T>
   inline void PushAppLayer(ImGuiApp* app)
   {
       //IM_STATIC_ASSERT((std::is_base_of_v<ImGuiAppLayerBase, T>));
@@ -405,8 +441,10 @@ namespace ImGui
       if (app->Layers.empty())
         return;
 
-      app->Layers.back()->OnDetach(app);
+      ImGuiAppLayerBase* layer = app->Layers.back();
       app->Layers.pop_back();
+      layer->OnDetach(app);
+      IM_DELETE(layer);
   }
 
   template <typename T>
@@ -422,6 +460,15 @@ namespace ImGui
   inline void PopAppWindow(ImGuiApp* app)
   {
     IM_ASSERT(app);
+
+    if (app->Windows.empty())
+      return;
+
+    ImGuiAppWindowBase* window = app->Windows.back();
+    app->Windows.pop_back();
+    ShutdownAppControls(app, window->Controls);
+    window->OnShutdown(app);
+    IM_DELETE(window);
   }
 
   template <typename T>
@@ -444,8 +491,11 @@ namespace ImGui
 
     if (app->Sidebars.empty())
       return;
-    app->Sidebars.back()->OnShutdown(app);
+    ImGuiAppSidebarBase* sidebar = app->Sidebars.back();
     app->Sidebars.pop_back();
+    ShutdownAppControls(app, sidebar->Controls);
+    sidebar->OnShutdown(app);
+    IM_DELETE(sidebar);
   }
 
   template <typename T>
@@ -536,6 +586,7 @@ namespace ImGui
       IM_ASSERT(instance_data);
 
       app->Data.SetVoidPtr(id, instance_data);
+      RegisterAppStorage(app, id, instance_data, DestroyAppStorageValue<typename T::ControlInstanceDataType>);
       sidebar->Controls.push_back(control);
       sidebar->Controls.back()->OnInitialize(app);
   }
