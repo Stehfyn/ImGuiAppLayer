@@ -50,17 +50,15 @@ struct ImGuiAppCommandLayer;              //
 
 // Forward declarations: ImGuiAppControl layer
 struct ImGuiAppControlBase;                  //
-template <typename PersistData, typename TempData, typename... DataDependencies>                struct ImGuiInterfaceAdapterBase; //
-template <typename Base, typename PersistData, typename TempData, typename... DataDependencies> struct ImGuiInterfaceAdapter;     //
-template <typename PersistData, typename TempData, typename... DataDependencies> struct ImGuiAppControl;            //
+template <typename PersistDataT, typename TempDataT, typename... DataDependencies>                struct ImGuiInterfaceAdapterBase; //
+template <typename Base, typename PersistDataT, typename TempDataT, typename... DataDependencies> struct ImGuiInterfaceAdapter;     //
+template <typename PersistDataT, typename TempDataT, typename... DataDependencies> struct ImGuiAppControl;            //
 
 // Forward declarations: ImGuiAppWindow layer
 struct ImGuiAppWindowBase;                   //
 
 // Forward declarations: ImGuiAppSidebar layer
 struct ImGuiAppSidebarBase;                  //
-
-enum ImGuiAppCommand;
 
 enum ImGuiAppCommand
 {
@@ -98,6 +96,10 @@ enum ImGuiAppCommandPrivate
 #define ImParseTypeStart '='
 #endif 
 #endif 
+
+#ifndef ImParseTypeStart2
+#define ImParseTypeStart2 ImParseTypeStart
+#endif
 
 #ifndef ImParseTypeEnd
 #ifdef _MSC_VER
@@ -218,14 +220,14 @@ struct ImGuiAppControlBase : ImGuiAppItemBase
 {
 };
 
-template <typename PersistData, typename TempData, typename... DataDependencies>
+template <typename PersistDataT, typename TempDataT, typename... DataDependencies>
 struct ImGuiInterfaceAdapterBase : ImGuiInterface
 {
-  virtual void OnInitialize(ImGuiApp*, PersistData*, const DataDependencies*...)                                                const = 0;
-  virtual void OnShutdown(ImGuiApp*, PersistData*, const DataDependencies*...)                                                  const = 0;
-  virtual void OnGetCommand(const ImGuiApp*, ImGuiAppCommand*, const PersistData*, const TempData*, const DataDependencies*...) const = 0;
-  virtual void OnUpdate(float, PersistData*, const TempData*, const TempData*, const DataDependencies*...)                      const = 0;
-  virtual void OnRender(const PersistData*, TempData*, const DataDependencies*...)                                              const = 0;
+  virtual void OnInitialize(ImGuiApp*, PersistDataT*, const DataDependencies*...)                                                const = 0;
+  virtual void OnShutdown(ImGuiApp*, PersistDataT*, const DataDependencies*...)                                                  const = 0;
+  virtual void OnGetCommand(const ImGuiApp*, ImGuiAppCommand*, const PersistDataT*, const TempDataT*, const DataDependencies*...) const = 0;
+  virtual void OnUpdate(float, PersistDataT*, const TempDataT*, const TempDataT*, const DataDependencies*...)                    const = 0;
+  virtual void OnRender(const PersistDataT*, TempDataT*, const DataDependencies*...)                                             const = 0;
 };
 
 struct ImGuiAppLayer : ImGuiAppLayerBase
@@ -298,15 +300,15 @@ struct ImGuiApp : ImGuiAppBase
   virtual void OnExecuteCommand(ImGuiAppCommand cmd) override;
 };
 
-template <typename Base, typename PersistData, typename TempData, typename... DataDependencies>
-struct ImGuiInterfaceAdapter : Base, ImGuiInterfaceAdapterBase<PersistData, TempData, DataDependencies...>
+template <typename Base, typename PersistDataT, typename TempDataT, typename... DataDependencies>
+struct ImGuiInterfaceAdapter : Base, ImGuiInterfaceAdapterBase<PersistDataT, TempDataT, DataDependencies...>
 {
     // Instance data for this control, created and stored in ImGuiApp::Data by PushAppControl<>(), and accessible from _InstanceData
     mutable struct InstanceData
     {
-      PersistData PersistData;
-      TempData    LastTempData;
-      TempData    TempData;
+      PersistDataT PersistData;
+      TempDataT    LastTempData;
+      TempDataT    TempData;
     } *_InstanceData;
 
     // If you assert here, it means that either this control's _InstanceData was not allocated and inserted into ImGuiApp::Data (performed by PushAppControl<>()) or
@@ -318,10 +320,10 @@ struct ImGuiInterfaceAdapter : Base, ImGuiInterfaceAdapterBase<PersistData, Temp
     //
     //
     //
-    virtual void OnInitialize(ImGuiApp*, PersistData*, const DataDependencies*...) const override {}
+    virtual void OnInitialize(ImGuiApp*, PersistDataT*, const DataDependencies*...) const override {}
     virtual void OnInitialize(ImGuiApp* app) const override final
     {
-      _InstanceData = reinterpret_cast<InstanceData*>(GetData<PersistData>(app)); // Cache pointer to instance data
+      _InstanceData = reinterpret_cast<InstanceData*>(GetData<PersistDataT>(app)); // Cache pointer to instance data
       std::apply([=](DataDependencies*... dependencies) { OnInitialize(app, &_InstanceData->PersistData, dependencies...); }, GetAllDependencyData(app));
     }
 
@@ -329,7 +331,7 @@ struct ImGuiInterfaceAdapter : Base, ImGuiInterfaceAdapterBase<PersistData, Temp
     //
     //
     //
-    virtual void OnShutdown(ImGuiApp*, PersistData*, const DataDependencies*...) const override {}
+    virtual void OnShutdown(ImGuiApp*, PersistDataT*, const DataDependencies*...) const override {}
     virtual void OnShutdown(ImGuiApp* app) const override final
     {
       std::apply([=](DataDependencies*... dependencies) { OnShutdown(app, &_InstanceData->PersistData, dependencies...); }, GetAllDependencyData(app));
@@ -339,7 +341,7 @@ struct ImGuiInterfaceAdapter : Base, ImGuiInterfaceAdapterBase<PersistData, Temp
     //
     //
     //
-    virtual void OnGetCommand(const ImGuiApp*, ImGuiAppCommand*, const PersistData*, const TempData*, const DataDependencies*...) const override {}
+    virtual void OnGetCommand(const ImGuiApp*, ImGuiAppCommand*, const PersistDataT*, const TempDataT*, const DataDependencies*...) const override {}
     virtual void OnGetCommand(const ImGuiApp* app, ImGuiAppCommand* cmd) const override final
     {
       std::apply([=](DataDependencies*... dependencies) { OnGetCommand(app, cmd, &_InstanceData->PersistData, &_InstanceData->TempData, dependencies...); }, GetAllDependencyData(app));
@@ -349,7 +351,7 @@ struct ImGuiInterfaceAdapter : Base, ImGuiInterfaceAdapterBase<PersistData, Temp
     //
     //
     //
-    virtual void OnUpdate(float, PersistData*, const TempData*, const TempData*, const DataDependencies*...) const override {}
+    virtual void OnUpdate(float, PersistDataT*, const TempDataT*, const TempDataT*, const DataDependencies*...) const override {}
     virtual void OnUpdate(const ImGuiApp* app, float dt) const override final
     {
       std::apply([=](DataDependencies*... dependencies) { OnUpdate(dt, &_InstanceData->PersistData, &_InstanceData->TempData, &_InstanceData->LastTempData, dependencies...); }, GetAllDependencyData(app));
@@ -360,7 +362,7 @@ struct ImGuiInterfaceAdapter : Base, ImGuiInterfaceAdapterBase<PersistData, Temp
     //
     //
     //
-    virtual void OnRender(const PersistData*, TempData*, const DataDependencies*...) const override {}
+    virtual void OnRender(const PersistDataT*, TempDataT*, const DataDependencies*...) const override {}
     virtual void OnRender(const ImGuiApp* app) const override final
     {
       _InstanceData->TempData = {};
@@ -368,11 +370,11 @@ struct ImGuiInterfaceAdapter : Base, ImGuiInterfaceAdapterBase<PersistData, Temp
     }
 };
 
-template <typename PersistData, typename TempData, typename... DataDependencies>
-struct ImGuiAppControl : ImGuiInterfaceAdapter<ImGuiAppControlBase, PersistData, TempData, DataDependencies...>
+template <typename PersistDataT, typename TempDataT, typename... DataDependencies>
+struct ImGuiAppControl : ImGuiInterfaceAdapter<ImGuiAppControlBase, PersistDataT, TempDataT, DataDependencies...>
 {
-  using ControlDataType = PersistData;
-  using ControlInstanceDataType = ImGuiInterfaceAdapter<ImGuiAppControlBase, PersistData, TempData, DataDependencies...>::InstanceData;
+  using ControlDataType = PersistDataT;
+  using ControlInstanceDataType = ImGuiInterfaceAdapter<ImGuiAppControlBase, PersistDataT, TempDataT, DataDependencies...>::InstanceData;
 };
 
 template <typename T>
