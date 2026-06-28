@@ -23,6 +23,10 @@ Index of this file:
 #include "imgui_internal.h"               // ImStrncpy
 #include "imapp_config.h"
 
+// Version (please keep in sync if you bump it)
+#define IMGUI_APPLAYER_VERSION      "0.1.0"
+#define IMGUI_APPLAYER_VERSION_NUM  100
+
 #include <mutex>                          // std::call_once
 #include <tuple>                          // 
 #include <type_traits>                    // 
@@ -239,7 +243,7 @@ namespace ImGui
   template <typename T>
   IMGUI_API inline void PushSidebarControl(ImGuiApp* app, ImGuiAppSidebarBase* sidebar);
 
-  IMGUI_API void ShowAppLayerDemo();
+  IMGUI_API void ShowAppLayerDemo(bool* p_open = nullptr);
 }
 
 struct ImGuiAppLayerBase : ImGuiInterface
@@ -270,6 +274,11 @@ struct ImGuiAppWindowBase : ImGuiAppItemBase
   ImVector<ImGuiAppControlBase*> Controls;
   ImVector<ImGuiStyleModEx> StyleMods;
   ImVector<ImGuiColorModEx> ColorMods;
+
+  // Optional first-use placement (applied with ImGuiCond_FirstUseEver, so saved .ini wins).
+  bool   HasInitialPlacement = false;
+  ImVec2 InitialPos = ImVec2(0.0f, 0.0f);
+  ImVec2 InitialSize = ImVec2(0.0f, 0.0f);
 };
 
 struct ImGuiAppSidebarBase : ImGuiAppWindowBase
@@ -352,6 +361,7 @@ struct ImGuiApp : ImGuiAppBase
   ImVector<ImGuiAppLayerBase*>   Layers;
   ImVector<ImGuiAppWindowBase*>  Windows;
   ImVector<ImGuiAppSidebarBase*> Sidebars;
+  ImVector<ImGuiAppControlBase*> Controls;
   ImGuiAppPlatform               Platform;
   ImVec4                         ClearColor;
   void*                          PlatformData;
@@ -439,6 +449,10 @@ struct ImGuiInterfaceAdapter : Base, ImGuiInterfaceAdapterBase<PersistDataT, Tem
       _InstanceData->TempData = {};
       std::apply([=, this](DataDependencies*... dependencies) { OnRender(&_InstanceData->PersistData, &_InstanceData->TempData, dependencies...); }, GetAllDependencyData(app));
     }
+
+    // Controls do not push/pop style by default (override in a derived control if needed).
+    virtual void OnStylePush(const ImGuiApp*) const override {}
+    virtual void OnStylePop(const ImGuiApp*) const override {}
 };
 
 template <typename PersistDataT, typename TempDataT, typename... DataDependencies>
@@ -574,39 +588,38 @@ namespace ImGui
   template <typename T>
   inline void PushAppControl(ImGuiApp* app)
   {
-  //    ImGuiID id;
-  //    T* control;
-  //    typename T::ControlInstanceDataType* instance_data;
-  //
-  //    IM_ASSERT(app);
-  //
-  //    // Use the control's data type hash for instance data storage/retrieval (so other controls which depend on instance_data->ControlData may access it)
-  //    id = ImGuiType<typename T::ControlDataType>::ID;
-  //
-  //    // Ensure we are not pushing a duplicate instance of this control data type
-  //    instance_data = static_cast<decltype(instance_data)>(app->Data.GetVoidPtr(id));
-  //    IM_ASSERT(nullptr == instance_data);
-  //
-  //    control = IM_NEW(T)();
-  //    IM_ASSERT(control);
-  //
-  //    instance_data = IM_NEW(typename T::ControlInstanceDataType)();
-  //    IM_ASSERT(instance_data);
-  //
-  //    app->Data.SetVoidPtr(id, instance_data);
-  //    app->Controls.push_back(control);
-  //    app->Controls.back()->OnInitialize(app);
+      IM_ASSERT(app);
+
+      // Use the control's data type hash for instance data storage/retrieval (so other controls which depend on instance_data->ControlData may access it)
+      ImGuiID id = ImGuiType<typename T::ControlDataType>::ID;
+
+      // Ensure we are not pushing a duplicate instance of this control data type
+      typename T::ControlInstanceDataType* instance_data = static_cast<typename T::ControlInstanceDataType*>(app->Data.GetVoidPtr(id));
+      IM_ASSERT(nullptr == instance_data);
+
+      T* control = IM_NEW(T)();
+      IM_ASSERT(control);
+
+      instance_data = IM_NEW(typename T::ControlInstanceDataType)();
+      IM_ASSERT(instance_data);
+
+      app->Data.SetVoidPtr(id, instance_data);
+      RegisterAppStorage(app, id, instance_data, DestroyAppStorageValue<typename T::ControlInstanceDataType>);
+      app->Controls.push_back(control);
+      app->Controls.back()->OnInitialize(app);
   }
 
   inline void PopAppControl(ImGuiApp* app)
   {
       IM_ASSERT(app);
 
-      //if (app->Controls.empty())
-      //  return;
-      //
-      //app->Controls.back()->OnShutdown(app);
-      //app->Controls.pop_back();
+      if (app->Controls.empty())
+        return;
+
+      ImGuiAppControlBase* control = app->Controls.back();
+      app->Controls.pop_back();
+      control->OnShutdown(app);
+      IM_DELETE(control);
   }
 
   //template <typename T>

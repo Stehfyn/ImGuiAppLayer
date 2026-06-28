@@ -271,6 +271,10 @@ void ImGuiAppWindowLayer::OnDetach(ImGuiApp* app) const
 
 void ImGuiAppWindowLayer::OnUpdate(ImGuiApp* app, float dt) const
 {
+    // App-level controls (not attached to a window/sidebar) render their own windows.
+    for (auto& control : app->Controls)
+      control->OnUpdate(app, dt);
+
     for (auto& sidebar : app->Sidebars)
     {
       for (auto& control : sidebar->Controls)
@@ -296,8 +300,17 @@ void ImGuiAppWindowLayer::OnRender(const ImGuiApp* app) const
 
       if (sidebar->Window && (sidebar->Flags & ImGuiWindowFlags_AlwaysAutoResize))
       {
-        int idx = (ImGuiDir_Up == sidebar->DockDir) || (ImGuiDir_Down == sidebar->DockDir);
-        sidebar->Size = sidebar->Window->ContentSizeIdeal[idx] + (2.0f * ImGui::GetStyle().WindowPadding[idx]);
+        const bool horizontal = (ImGuiDir_Left == sidebar->DockDir) || (ImGuiDir_Right == sidebar->DockDir);
+        const int  idx = horizontal ? 0 : 1;
+        float ideal = sidebar->Window->ContentSizeIdeal[idx] + (2.0f * ImGui::GetStyle().WindowPadding[idx]);
+
+        // Left/Right sidebars auto-size their width, but wrapped or auto-width content reports a
+        // collapsed ideal width (it wraps to the current bar width), making the bar far too thin.
+        // Clamp to a sensible minimum, in text units so it scales with the font.
+        if (horizontal)
+          ideal = ImMax(ideal, ImGui::GetFontSize() * 8.0f);
+
+        sidebar->Size = ideal;
       }
 
       if (ImGui::BeginViewportSideBar(sidebar->Label, sidebar->Viewport, sidebar->DockDir, sidebar->Size, sidebar->Flags))
@@ -313,11 +326,22 @@ void ImGuiAppWindowLayer::OnRender(const ImGuiApp* app) const
       ImGui::End();
 
       sidebar->OnStylePop(app);
+
+      // Controls render their own windows; submit them outside the sidebar's Begin/End.
+      for (auto& control : sidebar->Controls)
+        control->OnRender(app);
     }
 
     for (auto& window : app->Windows)
     {
       window->OnStylePush(app);
+
+      if (window->HasInitialPlacement)
+      {
+        if (window->InitialSize.x > 0.0f && window->InitialSize.y > 0.0f)
+          ImGui::SetNextWindowSize(window->InitialSize, ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowPos(window->InitialPos, ImGuiCond_FirstUseEver);
+      }
 
       if (ImGui::Begin(window->Label, &window->Open, window->Flags))
       {
@@ -327,7 +351,13 @@ void ImGuiAppWindowLayer::OnRender(const ImGuiApp* app) const
       ImGui::End();
 
       window->OnStylePop(app);
+
+      for (auto& control : window->Controls)
+        control->OnRender(app);
     }
+
+    for (auto& control : app->Controls)
+      control->OnRender(app);
 }
 
 namespace ImGui
@@ -414,6 +444,7 @@ namespace ImGui
         PopAppSidebar(app);
       while (!app->Windows.empty())
         PopAppWindow(app);
+      ShutdownAppControls(app, app->Controls);
       while (!app->Layers.empty())
         PopAppLayer(app);
 
