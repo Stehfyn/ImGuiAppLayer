@@ -1,5 +1,5 @@
 ﻿#pragma once
-#include "../imguix.h"
+#include "imguix.h"
 
 struct ImGuiApp;
 struct ImGuiAppPlatformState;

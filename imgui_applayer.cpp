@@ -15,9 +15,9 @@
 #include <algorithm>
 
 #ifdef IMGUIX_RENDERER_WEBGPU
-#include "imapp_backend_sdl2_wgpu.h"
+#include "backends/imapp_backend_sdl2_wgpu.h"
 #else
-#include "imapp_backend_sdl2_opengl3.h"
+#include "backends/imapp_backend_sdl2_opengl3.h"
 #endif
 #include "imapp_platform_state_sdl2.h"
 
@@ -56,9 +56,9 @@ namespace
 #include "imapp_platform_state_win32.h"
 
 #ifdef IMGUIX_RENDERER_VULKAN
-#include "imapp_backend_win32_vulkan.h"
+#include "backends/imapp_backend_win32_vulkan.h"
 #else
-#include "imapp_backend_win32_opengl3.h"
+#include "backends/imapp_backend_win32_opengl3.h"
 #endif
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
