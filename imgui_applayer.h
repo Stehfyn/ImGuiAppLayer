@@ -72,6 +72,18 @@ enum ImGuiAppCommandPrivate
   ImGuiAppCommandPrivate_ = ImGuiAppCommand_COUNT,
 };
 
+// Platform backend interface. The core app layer depends only on this vtable; it never
+// includes any concrete backend. Exactly one backend translation unit is linked per build
+// (selected by CMake), and that backend defines ImGuiApp_GetPlatformBackend().
+struct ImGuiAppPlatformBackend
+{
+  bool (*InitPlatform)(ImGuiApp* app, ImGuiAppConfig& config);
+  void (*ShutdownPlatform)(ImGuiApp* app);
+  int  (*RunLoop)(ImGuiApp* app);
+};
+
+IMGUI_API const ImGuiAppPlatformBackend* ImGuiApp_GetPlatformBackend();
+
 //-----------------------------------------------------------------------------
 // [SECTION] Compile-time helpers (ImGuiStatic<>, ImGuiType<>)
 //-----------------------------------------------------------------------------

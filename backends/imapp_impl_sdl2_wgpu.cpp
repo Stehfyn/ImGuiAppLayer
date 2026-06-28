@@ -1,6 +1,6 @@
-﻿#include "imapp_backend_sdl2_wgpu.h"
+﻿#include "imapp_impl_sdl2_wgpu.h"
 
-#include "ImGuiAppLayer/backends/imapp_platform_state_sdl2.h"
+#include "ImGuiAppLayer/backends/imapp_impl_sdl2_state.h"
 #include "ImGuiAppLayer/imgui_applayer.h"
 
 #include "imgui_impl_sdl2.h"
@@ -384,7 +384,7 @@ static bool ImGuiApp_Sdl2WGPU_Init(const ImGuiApp_Sdl2WGPU_InitInfo* init_info)
     GBackend.RendererBackendInitialized = true;
 
     ImGuiXInitInfo imguix_init_info;
-    imguix_init_info.Backend.Name = "imapp_backend_sdl2_wgpu";
+    imguix_init_info.Backend.Name = "imapp_impl_sdl2_wgpu";
     imguix_init_info.Backend.UserData = &GBackend;
     imguix_init_info.Backend.Shutdown = ShutdownBackend;
     imguix_init_info.Backend.NewFrame = NewFrame;
@@ -399,9 +399,10 @@ static bool ImGuiApp_Sdl2WGPU_Init(const ImGuiApp_Sdl2WGPU_InitInfo* init_info)
     return true;
 }
 
-bool ImGuiApp_Sdl2WGPU_InitPlatform(ImGuiApp* app, ImGuiAppPlatformState* state, ImGuiAppConfig& config)
+bool ImGuiApp_Sdl2WGPU_InitPlatform(ImGuiApp* app, ImGuiAppConfig& config)
 {
-    IM_ASSERT(state != nullptr);
+    ImGuiAppPlatformState* state = IM_NEW(ImGuiAppPlatformState)();
+    app->PlatformData = state;
 
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER | SDL_INIT_GAMECONTROLLER) != 0)
         return false;
@@ -438,16 +439,29 @@ bool ImGuiApp_Sdl2WGPU_InitPlatform(ImGuiApp* app, ImGuiAppPlatformState* state,
     return true;
 }
 
-void ImGuiApp_Sdl2WGPU_ShutdownPlatform(ImGuiApp* app, ImGuiAppPlatformState* state)
+void ImGuiApp_Sdl2WGPU_ShutdownPlatform(ImGuiApp* app)
 {
-    IM_UNUSED(app);
+    ImGuiAppPlatformState* state = static_cast<ImGuiAppPlatformState*>(app->PlatformData);
     if (state == nullptr)
         return;
+    state->Running = false;
     if (state->Window != nullptr)
     {
         SDL_DestroyWindow(state->Window);
         state->Window = nullptr;
     }
     SDL_Quit();
+
+    IM_DELETE(state);
+    app->PlatformData = nullptr;
 }
+
+static const ImGuiAppPlatformBackend GPlatformBackend =
+{
+    ImGuiApp_Sdl2WGPU_InitPlatform,
+    ImGuiApp_Sdl2WGPU_ShutdownPlatform,
+    ImGuiApp_ImplSDL2_RunLoop,
+};
+
+const ImGuiAppPlatformBackend* ImGuiApp_GetPlatformBackend() { return &GPlatformBackend; }
 

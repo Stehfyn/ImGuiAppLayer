@@ -1,4 +1,4 @@
-﻿#include "imapp_backend_win32_opengl3.h"
+﻿#include "imapp_impl_win32_opengl3.h"
 #include "imgui_impl_opengl3.h"
 #include "imgui_impl_win32.h"
 
@@ -8,7 +8,7 @@
 #include <windows.h>
 #include <GL/gl.h>
 
-#include "ImGuiAppLayer/backends/imapp_platform_state_win32.h"
+#include "ImGuiAppLayer/backends/imapp_impl_win32_state.h"
 #include "ImGuiAppLayer/imgui_applayer.h"
 
 namespace
@@ -217,7 +217,7 @@ static bool ImGuiApp_Win32OpenGL3_Init(const ImGuiApp_Win32OpenGL3_InitInfo* ini
     GBackend.RendererBackendInitialized = true;
 
     ImGuiXInitInfo imguix_init_info;
-    imguix_init_info.Backend.Name = "imapp_backend_win32_opengl3";
+    imguix_init_info.Backend.Name = "imapp_impl_win32_opengl3";
     imguix_init_info.Backend.UserData = &GBackend;
     imguix_init_info.Backend.Shutdown = ShutdownBackend;
     imguix_init_info.Backend.NewFrame = NewFrame;
@@ -232,9 +232,10 @@ static bool ImGuiApp_Win32OpenGL3_Init(const ImGuiApp_Win32OpenGL3_InitInfo* ini
     return true;
 }
 
-bool ImGuiApp_Win32OpenGL3_InitPlatform(ImGuiApp* app, ImGuiAppPlatformState* state, ImGuiAppConfig& config)
+bool ImGuiApp_Win32OpenGL3_InitPlatform(ImGuiApp* app, ImGuiAppConfig& config)
 {
-    IM_ASSERT(state != nullptr);
+    ImGuiAppPlatformState* state = IM_NEW(ImGuiAppPlatformState)();
+    app->PlatformData = state;
 
     GState = state;
 
@@ -245,7 +246,7 @@ bool ImGuiApp_Win32OpenGL3_InitPlatform(ImGuiApp* app, ImGuiAppPlatformState* st
     config.ConfigFlags = ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad | ImGuiConfigFlags_DockingEnable | ImGuiConfigFlags_ViewportsEnable;
 
     HINSTANCE instance = ::GetModuleHandle(nullptr);
-    state->WindowClass = { sizeof(state->WindowClass), CS_OWNDC | CS_BYTEALIGNCLIENT | CS_BYTEALIGNWINDOW, ImGuiApp_Win32WndProc, 0L, 0L, instance, nullptr, LoadCursor(nullptr, IDC_ARROW), (HBRUSH)(GetStockObject(BLACK_BRUSH)), nullptr, "ImGuiXWindow", nullptr };
+    state->WindowClass = { sizeof(state->WindowClass), CS_OWNDC | CS_BYTEALIGNCLIENT | CS_BYTEALIGNWINDOW, ImGuiApp_ImplWin32_WndProc, 0L, 0L, instance, nullptr, LoadCursor(nullptr, IDC_ARROW), (HBRUSH)(GetStockObject(BLACK_BRUSH)), nullptr, "ImGuiXWindow", nullptr };
     ::RegisterClassExA(&state->WindowClass);
     state->Hwnd = ::CreateWindowA(state->WindowClass.lpszClassName, config.WindowTitle, WS_OVERLAPPEDWINDOW, 100, 100, window_width, window_height, nullptr, nullptr, state->WindowClass.hInstance, nullptr);
     if (state->Hwnd == nullptr)
@@ -301,11 +302,13 @@ bool ImGuiApp_Win32OpenGL3_InitPlatform(ImGuiApp* app, ImGuiAppPlatformState* st
     return true;
 }
 
-void ImGuiApp_Win32OpenGL3_ShutdownPlatform(ImGuiApp* app, ImGuiAppPlatformState* state)
+void ImGuiApp_Win32OpenGL3_ShutdownPlatform(ImGuiApp* app)
 {
-    IM_UNUSED(app);
+    ImGuiAppPlatformState* state = static_cast<ImGuiAppPlatformState*>(app->PlatformData);
     if (state == nullptr)
         return;
+    if (state->Hwnd != nullptr)
+        ::SetWindowLongPtr(state->Hwnd, GWLP_USERDATA, 0);
     if (state->Hwnd != nullptr)
         CleanupDeviceWGL(state->Hwnd, &state->MainWindow);
     if (state->MainGLRC != nullptr)
@@ -325,4 +328,16 @@ void ImGuiApp_Win32OpenGL3_ShutdownPlatform(ImGuiApp* app, ImGuiAppPlatformState
     }
     if (GState == state)
         GState = nullptr;
+
+    IM_DELETE(state);
+    app->PlatformData = nullptr;
 }
+
+static const ImGuiAppPlatformBackend GPlatformBackend =
+{
+    ImGuiApp_Win32OpenGL3_InitPlatform,
+    ImGuiApp_Win32OpenGL3_ShutdownPlatform,
+    ImGuiApp_ImplWin32_RunLoop,
+};
+
+const ImGuiAppPlatformBackend* ImGuiApp_GetPlatformBackend() { return &GPlatformBackend; }
