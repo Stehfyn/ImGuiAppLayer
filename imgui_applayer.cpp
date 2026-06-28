@@ -1,29 +1,301 @@
-#define IMGUI_DEFINE_MATH_OPERATORS
+﻿#define IMGUI_DEFINE_MATH_OPERATORS
 #include "imgui_applayer.h"
 #include "imgui_internal.h"
+#include "imguix.h"
 
 #include <ctime>
+#include <cstdio>
 
-void ImGuiApp::OnExecuteCommand(ImGuiAppCommand cmd)
+#ifdef __EMSCRIPTEN__
+
+#include "imgui_impl_sdl2.h"
+#include <SDL.h>
+#include <emscripten.h>
+#include <emscripten/html5.h>
+#include <algorithm>
+
+#ifdef IMGUIX_RENDERER_WEBGPU
+#include "imapp_backend_sdl2_wgpu.h"
+#else
+#include "imapp_backend_sdl2_opengl3.h"
+#endif
+#include "imapp_platform_state_sdl2.h"
+
+namespace
 {
-    if (cmd == ImGuiAppCommand_Shutdown)
-        ShutdownPending = true;
+    void ResizeCanvasToCssSize(SDL_Window* window)
+    {
+        double css_width = 0.0;
+        double css_height = 0.0;
+        if (emscripten_get_element_css_size("#canvas", &css_width, &css_height) != EMSCRIPTEN_RESULT_SUCCESS)
+            return;
+
+        const double pixel_ratio = emscripten_get_device_pixel_ratio();
+        const int canvas_width = std::max(1, (int)(css_width * pixel_ratio));
+        const int canvas_height = std::max(1, (int)(css_height * pixel_ratio));
+
+        int current_width = 0;
+        int current_height = 0;
+        emscripten_get_canvas_element_size("#canvas", &current_width, &current_height);
+        if (current_width != canvas_width || current_height != canvas_height)
+        {
+            emscripten_set_canvas_element_size("#canvas", canvas_width, canvas_height);
+            if (window != nullptr)
+                SDL_SetWindowSize(window, (int)css_width, (int)css_height);
+        }
+    }
+}
+
+#elif defined(_WIN32)
+
+#include "imgui_impl_win32.h"
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include "imapp_platform_state_win32.h"
+
+#ifdef IMGUIX_RENDERER_VULKAN
+#include "imapp_backend_win32_vulkan.h"
+#else
+#include "imapp_backend_win32_opengl3.h"
+#endif
+
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+
+LRESULT WINAPI ImGuiApp_Win32WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    if (ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam))
+        return true;
+
+    switch (msg)
+    {
+    case WM_TIMER:
+        if (ImGuiApp* app = (ImGuiApp*)::GetWindowLongPtr(hWnd, GWLP_USERDATA))
+            app->OnDrawFrame();
+        return 0;
+    case WM_ENTERMENULOOP:
+    case WM_ENTERSIZEMOVE:
+        SetTimer(hWnd, 0, USER_TIMER_MINIMUM, 0);
+        return 0;
+    case WM_EXITMENULOOP:
+    case WM_EXITSIZEMOVE:
+        KillTimer(hWnd, 0);
+        return 0;
+    case WM_SIZE:
+        return 0;
+    case WM_SYSCOMMAND:
+        if ((wParam & 0xfff0) == SC_KEYMENU)
+            return 0;
+        break;
+    case WM_DESTROY:
+        ::PostQuitMessage(0);
+        return 0;
+    }
+    return ::DefWindowProc(hWnd, msg, wParam, lParam);
+}
+
+#endif // platform
+
+ImGuiAppConfig ImGuiApp::OnConfigure(int argc, char** argv)
+{
+    IM_UNUSED(argc);
+    IM_UNUSED(argv);
+    return ImGuiAppConfig{};
+}
+
+ImGuiApp::~ImGuiApp()
+{
+    Shutdown();
+}
+
+bool ImGuiApp::InitializePlatform(ImGuiAppConfig& config)
+{
+    IM_ASSERT(config.WindowTitle  != nullptr && "WindowTitle must be set by client in OnConfigure");
+    IM_ASSERT(config.WindowWidth  >  0       && "WindowWidth must be set by client in OnConfigure");
+    IM_ASSERT(config.WindowHeight >  0       && "WindowHeight must be set by client in OnConfigure");
+    IM_ASSERT(config.DpiScale     >  0.0f    && "DpiScale must be set by client in OnConfigure");
+
+#ifdef __EMSCRIPTEN__
+    ImGuiAppPlatformState* state = IM_NEW(ImGuiAppPlatformState)();
+    PlatformData = state;
+#  ifdef IMGUIX_RENDERER_WEBGPU
+    if (!ImGuiApp_Sdl2WGPU_InitPlatform(this, state, config))
+    {
+        ShutdownPlatform();
+        return false;
+    }
+#  else
+    if (!ImGuiApp_Sdl2OpenGL3_InitPlatform(this, state, config))
+    {
+        ShutdownPlatform();
+        return false;
+    }
+#  endif
+    return true;
+#elif defined(_WIN32)
+    ImGuiAppPlatformState* state = IM_NEW(ImGuiAppPlatformState)();
+    PlatformData = state;
+#  ifdef IMGUIX_RENDERER_VULKAN
+    if (!ImGuiApp_Win32Vulkan_InitPlatform(this, state, config))
+    {
+        ShutdownPlatform();
+        return false;
+    }
+#  else
+    if (!ImGuiApp_Win32OpenGL3_InitPlatform(this, state, config))
+    {
+        ShutdownPlatform();
+        return false;
+    }
+#  endif
+    return true;
+#else
+    return false;
+#endif
+}
+
+void ImGuiApp::ShutdownPlatform()
+{
+#ifdef __EMSCRIPTEN__
+    if (ImGuiAppPlatformState* state = static_cast<ImGuiAppPlatformState*>(PlatformData))
+        state->Running = false;
+#elif defined(_WIN32)
+    if (ImGuiAppPlatformState* state = static_cast<ImGuiAppPlatformState*>(PlatformData))
+        if (state->Hwnd != nullptr)
+            ::SetWindowLongPtr(state->Hwnd, GWLP_USERDATA, 0);
+#endif
+
+    if (ImGuiX::GetCurrentContext() != nullptr)
+    {
+        ImGuiX::Shutdown();
+        ImGuiX::DestroyContext();
+    }
+
+#ifdef __EMSCRIPTEN__
+#  ifdef IMGUIX_RENDERER_WEBGPU
+    ImGuiApp_Sdl2WGPU_ShutdownPlatform(this, static_cast<ImGuiAppPlatformState*>(PlatformData));
+#  else
+    ImGuiApp_Sdl2OpenGL3_ShutdownPlatform(this, static_cast<ImGuiAppPlatformState*>(PlatformData));
+#  endif
+    IM_DELETE(static_cast<ImGuiAppPlatformState*>(PlatformData));
+#elif defined(_WIN32)
+#  ifdef IMGUIX_RENDERER_VULKAN
+    ImGuiApp_Win32Vulkan_ShutdownPlatform(this, static_cast<ImGuiAppPlatformState*>(PlatformData));
+#  else
+    ImGuiApp_Win32OpenGL3_ShutdownPlatform(this, static_cast<ImGuiAppPlatformState*>(PlatformData));
+#  endif
+    IM_DELETE(static_cast<ImGuiAppPlatformState*>(PlatformData));
+#endif
+    PlatformData = nullptr;
+}
+
+int ImGuiApp::Run(int argc, char** argv)
+{
+    ImGuiAppConfig config = OnConfigure(argc, argv);
+
+    if (!InitializePlatform(config))
+        return 1;
+
+    if (!OnInitialize(argc, argv))
+    {
+        Shutdown();
+        return 1;
+    }
+
+#ifdef __EMSCRIPTEN__
+    emscripten_set_main_loop_arg([](void* ud)
+    {
+        ImGuiApp* app = static_cast<ImGuiApp*>(ud);
+        ImGuiAppPlatformState* s = static_cast<ImGuiAppPlatformState*>(app->PlatformData);
+        if (s == nullptr || !s->Running)
+            return;
+
+        SDL_Event event;
+        while (SDL_PollEvent(&event))
+        {
+            ImGui_ImplSDL2_ProcessEvent(&event);
+            if (event.type == SDL_QUIT)
+            {
+                app->Shutdown();
+                return;
+            }
+            if (event.type == SDL_WINDOWEVENT &&
+                event.window.event == SDL_WINDOWEVENT_CLOSE &&
+                event.window.windowID == SDL_GetWindowID(s->Window))
+            {
+                app->Shutdown();
+                return;
+            }
+        }
+
+        ResizeCanvasToCssSize(s->Window);
+        app->OnDrawFrame();
+    }, this, 0, true);
+
+    return 0;
+
+#elif defined(_WIN32)
+    HWND hwnd = (HWND)Platform.NativeWindowHandle;
+    bool done = false;
+    while (!done)
+    {
+        MSG msg;
+        while (::PeekMessage(&msg, nullptr, 0U, 0U, PM_REMOVE))
+        {
+            ::TranslateMessage(&msg);
+            ::DispatchMessage(&msg);
+            if (msg.message == WM_QUIT)
+                done = true;
+        }
+        if (done)
+            break;
+        if (hwnd && ::IsIconic(hwnd))
+        {
+            ::Sleep(10);
+            continue;
+        }
+        OnDrawFrame();
+    }
+
+    Shutdown();
+    return 0;
+#endif
 }
 
 bool ImGuiApp::Initialize(const ImGuiAppConfig* config)
 {
+    IM_ASSERT(config != nullptr && "config must be provided; call Initialize from InitializePlatform");
+
     if (Initialized)
         Shutdown();
 
     ShutdownPending = false;
-    Platform = config != nullptr ? config->Platform : ImGuiAppPlatform();
 
-    if (Platform.Initialize != nullptr && !Platform.Initialize(this, Platform.UserData))
+    const ImGuiAppConfig& cfg = *config;
+    Platform.Name               = cfg.Platform.Name;
+    Platform.NativeWindowHandle = cfg.Platform.NativeWindowHandle;
+
+    ImGuiIO& io = ImGui::GetIO();
+    io.ConfigFlags |= cfg.ConfigFlags;
+    if (!cfg.PersistSettings)
+        io.IniFilename = nullptr;
+
+    ImGui::StyleColorsDark();
+
+    ImGuiStyle& style = ImGui::GetStyle();
+    if (cfg.DpiScale != 1.0f)
     {
-        if (Platform.Shutdown != nullptr)
-            Platform.Shutdown(this, Platform.UserData);
-        Platform = ImGuiAppPlatform();
-        return false;
+        style.ScaleAllSizes(cfg.DpiScale);
+        style.FontScaleDpi = cfg.DpiScale;
+        io.ConfigDpiScaleFonts = true;
+        io.ConfigDpiScaleViewports = true;
+    }
+
+    if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
+    {
+        style.WindowRounding = 0.0f;
+        style.Colors[ImGuiCol_WindowBg].w = 1.0f;
     }
 
     ImGui::InitializeApp(this);
@@ -33,17 +305,34 @@ bool ImGuiApp::Initialize(const ImGuiAppConfig* config)
 
 void ImGuiApp::Shutdown()
 {
-    if (!Initialized && Layers.empty() && Windows.empty() && Sidebars.empty() && StorageEntries.empty() && Platform.Shutdown == nullptr)
+    if (!Initialized && PlatformData == nullptr && Layers.empty() && Windows.empty() && Sidebars.empty() && StorageEntries.empty())
         return;
 
     ImGui::ShutdownApp(this);
+    ShutdownPlatform();
 
-    if (Platform.Shutdown != nullptr)
-        Platform.Shutdown(this, Platform.UserData);
-
-    Platform = ImGuiAppPlatform();
-    Initialized = false;
+    Platform        = ImGuiAppPlatform();
+    Initialized     = false;
     ShutdownPending = false;
+}
+
+ImGuiAppFrameConfig ImGuiApp::OnFrameConfig()
+{
+    return ImGuiAppFrameConfig{};
+}
+
+void ImGuiApp::OnDrawFrame()
+{
+    const ImGuiAppFrameConfig frame_config = OnFrameConfig();
+    ImGuiX::BeginFrame();
+    DrawFrame(this);
+    ImGuiX::EndFrame(&frame_config);
+}
+
+void ImGuiApp::OnExecuteCommand(ImGuiAppCommand cmd)
+{
+    if (cmd == ImGuiAppCommand_Shutdown)
+        ShutdownPending = true;
 }
 
 void ImGuiApp::DrawFrame(ImGuiApp* app)
@@ -570,3 +859,4 @@ namespace ImGui
         ShutdownApp(&app);
   }
 }
+

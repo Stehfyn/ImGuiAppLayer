@@ -341,12 +341,21 @@ struct ImGuiApp : ImGuiAppBase
   ImVector<ImGuiAppWindowBase*>  Windows;
   ImVector<ImGuiAppSidebarBase*> Sidebars;
   ImGuiAppPlatform               Platform;
+  void*                          PlatformData = nullptr;
   bool                           Initialized = false;
 
+  virtual ~ImGuiApp();
+  int  Run(int argc, char** argv);
   bool Initialize(const ImGuiAppConfig* config = nullptr);
-  void Shutdown();
+  virtual bool InitializePlatform(ImGuiAppConfig& config);
+  virtual void ShutdownPlatform();
+  virtual void Shutdown();
   static void DrawFrame(ImGuiApp* app);
   bool IsInitialized() const { return Initialized; }
+  virtual ImGuiAppConfig    OnConfigure(int argc, char** argv);
+  virtual ImGuiAppFrameConfig OnFrameConfig();
+  virtual bool OnInitialize(int argc, char** argv) { return true; }
+  virtual void OnDrawFrame();
   virtual void OnExecuteCommand(ImGuiAppCommand cmd) override;
 };
 
