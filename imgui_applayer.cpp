@@ -97,24 +97,16 @@ LRESULT WINAPI ImGuiApp_Win32WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
 
 #endif // platform
 
-ImGuiAppConfig ImGuiApp::OnConfigure(int argc, char** argv)
-{
-    IM_UNUSED(argc);
-    IM_UNUSED(argv);
-    return ImGuiAppConfig{};
-}
-
 ImGuiApp::~ImGuiApp()
 {
     Shutdown();
 }
 
-bool ImGuiApp::InitializePlatform(ImGuiAppConfig& config)
+bool ImGuiApp::OnInitializePlatform(ImGuiAppConfig& config)
 {
-    IM_ASSERT(config.WindowTitle  != nullptr && "WindowTitle must be set by client in OnConfigure");
-    IM_ASSERT(config.WindowWidth  >  0       && "WindowWidth must be set by client in OnConfigure");
-    IM_ASSERT(config.WindowHeight >  0       && "WindowHeight must be set by client in OnConfigure");
-    IM_ASSERT(config.DpiScale     >  0.0f    && "DpiScale must be set by client in OnConfigure");
+    IM_ASSERT(config.WindowTitle  != nullptr && "WindowTitle must be set in config passed to Initialize");
+    IM_ASSERT(config.WindowWidth  >  0       && "WindowWidth must be set in config passed to Initialize");
+    IM_ASSERT(config.WindowHeight >  0       && "WindowHeight must be set in config passed to Initialize");
 
 #ifdef __EMSCRIPTEN__
     ImGuiAppPlatformState* state = IM_NEW(ImGuiAppPlatformState)();
@@ -122,13 +114,13 @@ bool ImGuiApp::InitializePlatform(ImGuiAppConfig& config)
 #  ifdef IMGUIX_RENDERER_WEBGPU
     if (!ImGuiApp_Sdl2WGPU_InitPlatform(this, state, config))
     {
-        ShutdownPlatform();
+        OnShutdownPlatform();
         return false;
     }
 #  else
     if (!ImGuiApp_Sdl2OpenGL3_InitPlatform(this, state, config))
     {
-        ShutdownPlatform();
+        OnShutdownPlatform();
         return false;
     }
 #  endif
@@ -139,13 +131,13 @@ bool ImGuiApp::InitializePlatform(ImGuiAppConfig& config)
 #  ifdef IMGUIX_RENDERER_VULKAN
     if (!ImGuiApp_Win32Vulkan_InitPlatform(this, state, config))
     {
-        ShutdownPlatform();
+        OnShutdownPlatform();
         return false;
     }
 #  else
     if (!ImGuiApp_Win32OpenGL3_InitPlatform(this, state, config))
     {
-        ShutdownPlatform();
+        OnShutdownPlatform();
         return false;
     }
 #  endif
@@ -155,7 +147,7 @@ bool ImGuiApp::InitializePlatform(ImGuiAppConfig& config)
 #endif
 }
 
-void ImGuiApp::ShutdownPlatform()
+void ImGuiApp::OnShutdownPlatform()
 {
 #ifdef __EMSCRIPTEN__
     if (ImGuiAppPlatformState* state = static_cast<ImGuiAppPlatformState*>(PlatformData))
@@ -192,11 +184,6 @@ void ImGuiApp::ShutdownPlatform()
 
 int ImGuiApp::Run(int argc, char** argv)
 {
-    ImGuiAppConfig config = OnConfigure(argc, argv);
-
-    if (!InitializePlatform(config))
-        return 1;
-
     if (!OnInitialize(argc, argv))
     {
         Shutdown();
@@ -265,16 +252,17 @@ int ImGuiApp::Run(int argc, char** argv)
 
 bool ImGuiApp::Initialize(const ImGuiAppConfig* config)
 {
-    IM_ASSERT(config != nullptr && "config must be provided; call Initialize from InitializePlatform");
+    IM_ASSERT(config != nullptr);
 
     if (Initialized)
         Shutdown();
 
     ShutdownPending = false;
 
-    const ImGuiAppConfig& cfg = *config;
-    Platform.Name               = cfg.Platform.Name;
-    Platform.NativeWindowHandle = cfg.Platform.NativeWindowHandle;
+    ImGuiAppConfig cfg = *config;
+
+    if (!OnInitializePlatform(cfg))
+        return false;
 
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= cfg.ConfigFlags;
@@ -282,30 +270,6 @@ bool ImGuiApp::Initialize(const ImGuiAppConfig* config)
         io.IniFilename = nullptr;
 
     ClearColor = cfg.ClearColor;
-
-    switch (cfg.Style)
-    {
-    case ImGuiAppStyle_Light:   ImGui::StyleColorsLight();   break;
-    case ImGuiAppStyle_Classic: ImGui::StyleColorsClassic(); break;
-    default:                          ImGui::StyleColorsDark();    break;
-    }
-
-    ImGuiStyle& style = ImGui::GetStyle();
-    if (cfg.FontScale != 0.0f && cfg.FontScale != 1.0f)
-        io.FontGlobalScale = cfg.FontScale;
-    if (cfg.DpiScale != 1.0f)
-    {
-        style.ScaleAllSizes(cfg.DpiScale);
-        style.FontScaleDpi = cfg.DpiScale;
-        io.ConfigDpiScaleFonts = true;
-        io.ConfigDpiScaleViewports = true;
-    }
-
-    if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
-    {
-        style.WindowRounding = 0.0f;
-        style.Colors[ImGuiCol_WindowBg].w = 1.0f;
-    }
 
     ImGui::InitializeApp(this);
     Initialized = true;
@@ -318,23 +282,17 @@ void ImGuiApp::Shutdown()
         return;
 
     ImGui::ShutdownApp(this);
-    ShutdownPlatform();
+    OnShutdownPlatform();
 
     Platform        = ImGuiAppPlatform();
     Initialized     = false;
     ShutdownPending = false;
 }
 
-ImGuiAppFrameConfig ImGuiApp::OnFrameConfig()
-{
-    ImGuiAppFrameConfig fc;
-    fc.ClearColor = ClearColor;
-    return fc;
-}
-
 void ImGuiApp::OnDrawFrame()
 {
-    const ImGuiAppFrameConfig frame_config = OnFrameConfig();
+    ImGuiAppFrameConfig frame_config;
+    frame_config.ClearColor = ClearColor;
     ImGuiX::BeginFrame();
     DrawFrame(this);
     ImGuiX::EndFrame(&frame_config);
@@ -356,7 +314,7 @@ void ImGuiApp::DrawFrame(ImGuiApp* app)
     ImGui::RenderApp(app);
 }
 
-void ImGuiAppTaskLayer::OnAttach(ImGuiApp* app ) const
+void ImGuiAppTaskLayer::OnAttach(ImGuiApp* app) const
 {
     IM_UNUSED(app);
 }

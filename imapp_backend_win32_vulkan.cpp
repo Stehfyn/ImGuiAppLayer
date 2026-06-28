@@ -844,12 +844,7 @@ bool ImGuiApp_Win32Vulkan_InitPlatform(ImGuiApp* app, ImGuiAppPlatformState* sta
         return false;
     }
 
-    if (!app->Initialize(&config))
-    {
-        ImGuiX::Shutdown();
-        ImGuiX::DestroyContext();
-        return false;
-    }
+    ImGui::GetIO().ConfigFlags |= config.ConfigFlags;
 
     app->Platform.Name               = config.Platform.Name;
     app->Platform.NativeWindowHandle = state->Hwnd;

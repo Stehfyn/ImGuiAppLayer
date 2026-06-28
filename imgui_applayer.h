@@ -342,22 +342,21 @@ struct ImGuiApp : ImGuiAppBase
   ImVector<ImGuiAppSidebarBase*> Sidebars;
   ImGuiAppPlatform               Platform;
   ImVec4                         ClearColor;
-  void*                          PlatformData = nullptr;
-  bool                           Initialized = false;
+  void*                          PlatformData;
+  bool                           Initialized;
 
+  ImGuiApp() : PlatformData(nullptr), Initialized(false) {}
   virtual ~ImGuiApp();
-  int  Run(int argc, char** argv);
-  bool Initialize(const ImGuiAppConfig* config = nullptr);
-  virtual bool InitializePlatform(ImGuiAppConfig& config);
-  virtual void ShutdownPlatform();
-  virtual void Shutdown();
-  static void DrawFrame(ImGuiApp* app);
-  bool IsInitialized() const { return Initialized; }
-  virtual ImGuiAppConfig    OnConfigure(int argc, char** argv);
-  virtual ImGuiAppFrameConfig OnFrameConfig();
-  virtual bool OnInitialize(int argc, char** argv) { return true; }
-  virtual void OnDrawFrame();
-  virtual void OnExecuteCommand(ImGuiAppCommand cmd) override;
+  int                         Run(int argc, char** argv);
+  bool                        Initialize(const ImGuiAppConfig* config);
+  bool                        IsInitialized() const { return Initialized; }
+  virtual void                Shutdown();
+  static void                 DrawFrame(ImGuiApp* app);
+  virtual bool                OnInitialize(int argc, char** argv) { return true; }
+  virtual void                OnDrawFrame();
+  virtual void                OnExecuteCommand(ImGuiAppCommand cmd) override;
+  virtual bool                OnInitializePlatform(ImGuiAppConfig& config);
+  virtual void                OnShutdownPlatform();
 };
 
 template <typename Base, typename PersistDataT, typename TempDataT, typename... DataDependencies>

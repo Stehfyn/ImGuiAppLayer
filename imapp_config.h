@@ -17,6 +17,12 @@ struct ImGuiAppFrameConfig
 {
     ImVec4             ClearColor;
     ImGuiAppFrameFlags Flags;
+
+    ImGuiAppFrameConfig()
+        : ClearColor(0.0f, 0.0f, 0.0f, 1.0f)
+        , Flags(ImGuiAppFrameFlags_None)
+    {
+    }
 };
 
 enum ImGuiAppStyle_

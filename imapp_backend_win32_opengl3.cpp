@@ -6,6 +6,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <GL/gl.h>
 
 #include "imapp_platform_state_win32.h"
 #include "imgui_applayer.h"
@@ -279,13 +280,7 @@ bool ImGuiApp_Win32OpenGL3_InitPlatform(ImGuiApp* app, ImGuiAppPlatformState* st
         return false;
     }
 
-    if (!app->Initialize(&config))
-    {
-        ImGuiX::Shutdown();
-        ImGuiX::DestroyContext();
-        GState = nullptr;
-        return false;
-    }
+    ImGui::GetIO().ConfigFlags |= config.ConfigFlags;
 
     if (ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
     {
@@ -331,4 +326,3 @@ void ImGuiApp_Win32OpenGL3_ShutdownPlatform(ImGuiApp* app, ImGuiAppPlatformState
     if (GState == state)
         GState = nullptr;
 }
-
