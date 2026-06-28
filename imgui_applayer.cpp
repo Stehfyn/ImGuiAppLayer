@@ -132,7 +132,37 @@ void ImGuiAppStatusLayer::OnUpdate(ImGuiApp* app, float dt) const
 
 void ImGuiAppStatusLayer::OnRender(const ImGuiApp* app) const
 {
-    IM_UNUSED(app);
+    IM_ASSERT(app != nullptr);
+    if (app == nullptr)
+        return;
+
+    const ImGuiIO& io = ImGui::GetIO();
+    const char* app_platform = app->Platform.Name != nullptr ? app->Platform.Name : "unknown";
+    const char* imgui_platform = io.BackendPlatformName != nullptr ? io.BackendPlatformName : "unknown";
+    const char* renderer = io.BackendRendererName != nullptr ? io.BackendRendererName : "unknown";
+
+    ImGuiViewport* viewport = ImGui::GetMainViewport();
+    const ImVec2 padding = ImVec2(8.0f, 8.0f);
+    ImGui::SetNextWindowViewport(viewport->ID);
+    ImGui::SetNextWindowPos(viewport->WorkPos + ImVec2(padding.x, viewport->WorkSize.y - padding.y), ImGuiCond_Always, ImVec2(0.0f, 1.0f));
+    ImGui::SetNextWindowBgAlpha(0.65f);
+
+    ImGuiWindowFlags flags =
+        ImGuiWindowFlags_NoDecoration |
+        ImGuiWindowFlags_NoDocking |
+        ImGuiWindowFlags_AlwaysAutoResize |
+        ImGuiWindowFlags_NoSavedSettings |
+        ImGuiWindowFlags_NoFocusOnAppearing |
+        ImGuiWindowFlags_NoNav |
+        ImGuiWindowFlags_NoInputs;
+
+    if (ImGui::Begin("AppLayerStatus", nullptr, flags))
+    {
+        ImGui::Text("App: %s", app_platform);
+        ImGui::Text("Platform: %s", imgui_platform);
+        ImGui::Text("Renderer: %s", renderer);
+    }
+    ImGui::End();
 }
 
 namespace
