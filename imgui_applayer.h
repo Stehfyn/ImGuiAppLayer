@@ -116,7 +116,57 @@ template <typename T>
 struct ImGuiStatic
 {
   inline static constexpr const char*      _FunctionSignature()                { return ImFuncSig; }
-  inline static constexpr std::string_view _ParseType(std::string_view sv)     { size_t end = sv.rfind(ImParseTypeEnd); auto sv2 = sv.substr(0, end); size_t start = (sv2.rfind(ImParseTypeStart) > sv2.rfind(ImParseTypeStart2)) ? sv2.rfind(ImParseTypeStart) : sv2.rfind(ImParseTypeStart2); start = start >= end ? 0 : start;  return (sv.size() > end) && (end >= (start + 2)) ? sv.substr(start + 2, end - (start + 1)) : sv; }
+  inline static constexpr bool             _StartsWith(std::string_view sv, std::string_view prefix) { return sv.size() >= prefix.size() && sv.substr(0, prefix.size()) == prefix; }
+  inline static constexpr std::string_view _StripTypeKeyword(std::string_view sv)
+  {
+    return _StartsWith(sv, "struct ") ? sv.substr(7) :
+           _StartsWith(sv, "class ")  ? sv.substr(6) :
+           _StartsWith(sv, "enum ")   ? sv.substr(5) :
+           _StartsWith(sv, "union ")  ? sv.substr(6) : sv;
+  }
+  inline static constexpr std::string_view _StripDisplayScope(std::string_view sv)
+  {
+    sv = _StripTypeKeyword(sv);
+    size_t scope = sv.rfind("::");
+    return _StripTypeKeyword(scope == std::string_view::npos ? sv : sv.substr(scope + 2));
+  }
+  inline static constexpr std::string_view _ParseType(std::string_view sv)
+  {
+    constexpr std::string_view clang_marker = "T = ";
+    size_t start = sv.find(clang_marker);
+    if (start != std::string_view::npos)
+    {
+      start += clang_marker.size();
+      size_t end = sv.find(';', start);
+      size_t bracket_end = sv.find(']', start);
+      if (end == std::string_view::npos || (bracket_end != std::string_view::npos && bracket_end < end))
+        end = bracket_end;
+      if (end == std::string_view::npos)
+        end = sv.size();
+      return _StripDisplayScope(sv.substr(start, end - start));
+    }
+
+    constexpr std::string_view msvc_marker = "ImGuiStatic<";
+    start = sv.find(msvc_marker);
+    if (start != std::string_view::npos)
+    {
+      start += msvc_marker.size();
+      size_t depth = 1;
+      for (size_t i = start; i < sv.size(); ++i)
+      {
+        if (sv[i] == '<')
+          ++depth;
+        else if (sv[i] == '>' && --depth == 0)
+          return _StripDisplayScope(sv.substr(start, i - start));
+      }
+    }
+
+    size_t end = sv.rfind(ImParseTypeEnd);
+    auto sv2 = sv.substr(0, end);
+    start = (sv2.rfind(ImParseTypeStart) > sv2.rfind(ImParseTypeStart2)) ? sv2.rfind(ImParseTypeStart) : sv2.rfind(ImParseTypeStart2);
+    start = start >= end ? 0 : start;
+    return _StripDisplayScope((sv.size() > end) && (end >= (start + 2)) ? sv.substr(start + 2, end - (start + 1)) : sv);
+  }
   inline static constexpr ImGuiID          _ConstantHash(std::string_view sv)  { return *sv.data() ? static_cast<ImGuiID>(*sv.data()) + 33 * _ConstantHash(sv.data() + 1) : 5381; }
   inline static           ImGuiID          GetRelativeID()                     { std::call_once(_Initialized, []() { Count = 1; }); return Count++; }
   static constexpr        std::string_view Name                                { _ParseType(_FunctionSignature()) };
@@ -129,9 +179,9 @@ template <typename T>
 using ImGuiType = ImGuiStatic<std::remove_cvref_t<std::remove_pointer_t<T>>>;
 
 template <typename T>
-inline static void GenerateLabel(char* label, size_t size) { std::string_view sv = ImGuiType<T>::Name; IM_ASSERT(sv.length() < sizeof(size)); ImStrncpy(label, sv.data(), sv.size()); }
+inline static void GenerateLabel(char* label, size_t size) { std::string_view sv = ImGuiType<T>::Name; ImFormatString(label, size, "%.*s", (int)sv.size(), sv.data()); }
 template <typename T>
-inline static void GenerateUniqueLabel(char* label, size_t size) { char type[256]; std::string_view sv = ImGuiType<T>::Name; ImStrncpy((char*)type, sv.data(), sv.size()); ImFormatString(label, size, "%s##%d", type, ImGuiType<T>::GetRelativeID()); }
+inline static void GenerateUniqueLabel(char* label, size_t size) { std::string_view sv = ImGuiType<T>::Name; ImFormatString(label, size, "%.*s##%d", (int)sv.size(), sv.data(), ImGuiType<T>::GetRelativeID()); }
 
 struct ImGuiColorModEx
 {
@@ -324,7 +374,7 @@ struct ImGuiInterfaceAdapter : Base, ImGuiInterfaceAdapterBase<PersistDataT, Tem
     virtual void OnInitialize(ImGuiApp* app) const override final
     {
       _InstanceData = reinterpret_cast<InstanceData*>(GetData<PersistDataT>(app)); // Cache pointer to instance data
-      std::apply([=](DataDependencies*... dependencies) { OnInitialize(app, &_InstanceData->PersistData, dependencies...); }, GetAllDependencyData(app));
+      std::apply([=, this](DataDependencies*... dependencies) { OnInitialize(app, &_InstanceData->PersistData, dependencies...); }, GetAllDependencyData(app));
     }
 
     //
@@ -334,7 +384,7 @@ struct ImGuiInterfaceAdapter : Base, ImGuiInterfaceAdapterBase<PersistDataT, Tem
     virtual void OnShutdown(ImGuiApp*, PersistDataT*, const DataDependencies*...) const override {}
     virtual void OnShutdown(ImGuiApp* app) const override final
     {
-      std::apply([=](DataDependencies*... dependencies) { OnShutdown(app, &_InstanceData->PersistData, dependencies...); }, GetAllDependencyData(app));
+      std::apply([=, this](DataDependencies*... dependencies) { OnShutdown(app, &_InstanceData->PersistData, dependencies...); }, GetAllDependencyData(app));
     }
 
     //
@@ -344,7 +394,7 @@ struct ImGuiInterfaceAdapter : Base, ImGuiInterfaceAdapterBase<PersistDataT, Tem
     virtual void OnGetCommand(const ImGuiApp*, ImGuiAppCommand*, const PersistDataT*, const TempDataT*, const DataDependencies*...) const override {}
     virtual void OnGetCommand(const ImGuiApp* app, ImGuiAppCommand* cmd) const override final
     {
-      std::apply([=](DataDependencies*... dependencies) { OnGetCommand(app, cmd, &_InstanceData->PersistData, &_InstanceData->TempData, dependencies...); }, GetAllDependencyData(app));
+      std::apply([=, this](DataDependencies*... dependencies) { OnGetCommand(app, cmd, &_InstanceData->PersistData, &_InstanceData->TempData, dependencies...); }, GetAllDependencyData(app));
     }
 
     //
@@ -354,7 +404,7 @@ struct ImGuiInterfaceAdapter : Base, ImGuiInterfaceAdapterBase<PersistDataT, Tem
     virtual void OnUpdate(float, PersistDataT*, const TempDataT*, const TempDataT*, const DataDependencies*...) const override {}
     virtual void OnUpdate(const ImGuiApp* app, float dt) const override final
     {
-      std::apply([=](DataDependencies*... dependencies) { OnUpdate(dt, &_InstanceData->PersistData, &_InstanceData->TempData, &_InstanceData->LastTempData, dependencies...); }, GetAllDependencyData(app));
+      std::apply([=, this](DataDependencies*... dependencies) { OnUpdate(dt, &_InstanceData->PersistData, &_InstanceData->TempData, &_InstanceData->LastTempData, dependencies...); }, GetAllDependencyData(app));
       _InstanceData->LastTempData = _InstanceData->TempData;
     }
 
@@ -366,7 +416,7 @@ struct ImGuiInterfaceAdapter : Base, ImGuiInterfaceAdapterBase<PersistDataT, Tem
     virtual void OnRender(const ImGuiApp* app) const override final
     {
       _InstanceData->TempData = {};
-      std::apply([=](DataDependencies*... dependencies) { OnRender(&_InstanceData->PersistData, &_InstanceData->TempData, dependencies...); }, GetAllDependencyData(app));
+      std::apply([=, this](DataDependencies*... dependencies) { OnRender(&_InstanceData->PersistData, &_InstanceData->TempData, dependencies...); }, GetAllDependencyData(app));
     }
 };
 
