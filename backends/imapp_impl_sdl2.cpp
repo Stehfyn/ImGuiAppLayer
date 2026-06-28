@@ -1,8 +1,8 @@
 // Shared SDL2/emscripten platform layer: canvas sizing + emscripten main loop.
 // Renderer-agnostic; linked alongside whichever SDL2 renderer backend the build selects.
 
-#include "ImGuiAppLayer/imgui_applayer.h"
-#include "ImGuiAppLayer/backends/imapp_impl_sdl2_state.h"
+#include "imgui_applayer.h"
+#include "imapp_impl_sdl2_state.h"
 
 #include "imgui_impl_sdl2.h"
 #include <SDL.h>

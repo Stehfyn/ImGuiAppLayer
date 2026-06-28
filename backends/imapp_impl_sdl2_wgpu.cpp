@@ -1,7 +1,7 @@
 ﻿#include "imapp_impl_sdl2_wgpu.h"
 
-#include "ImGuiAppLayer/backends/imapp_impl_sdl2_state.h"
-#include "ImGuiAppLayer/imgui_applayer.h"
+#include "imapp_impl_sdl2_state.h"
+#include "imgui_applayer.h"
 
 #include "imgui_impl_sdl2.h"
 #include "imgui_impl_wgpu.h"
