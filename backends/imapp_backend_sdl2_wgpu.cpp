@@ -1,5 +1,8 @@
 ﻿#include "imapp_backend_sdl2_wgpu.h"
 
+#include "ImGuiAppLayer/backends/imapp_platform_state_sdl2.h"
+#include "ImGuiAppLayer/imgui_applayer.h"
+
 #include "imgui_impl_sdl2.h"
 #include "imgui_impl_wgpu.h"
 
@@ -447,5 +450,4 @@ void ImGuiApp_Sdl2WGPU_ShutdownPlatform(ImGuiApp* app, ImGuiAppPlatformState* st
     }
     SDL_Quit();
 }
-
 

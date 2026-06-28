@@ -1,7 +1,7 @@
 ﻿
 #include "imapp_backend_win32_vulkan.h"
-#include "imgui_applayer.h"
-#include "imapp_platform_state_win32.h"
+#include "ImGuiAppLayer/imgui_applayer.h"
+#include "ImGuiAppLayer/backends/imapp_platform_state_win32.h"
 
 #include "imgui_impl_win32.h"
 
@@ -868,6 +868,5 @@ void ImGuiApp_Win32Vulkan_ShutdownPlatform(ImGuiApp* app, ImGuiAppPlatformState*
         state->WindowClass = {};
     }
 }
-
 
 

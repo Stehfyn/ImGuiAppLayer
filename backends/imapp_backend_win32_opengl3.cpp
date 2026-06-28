@@ -8,8 +8,8 @@
 #include <windows.h>
 #include <GL/gl.h>
 
-#include "imapp_platform_state_win32.h"
-#include "imgui_applayer.h"
+#include "ImGuiAppLayer/backends/imapp_platform_state_win32.h"
+#include "ImGuiAppLayer/imgui_applayer.h"
 
 namespace
 {

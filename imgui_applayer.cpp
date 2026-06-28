@@ -19,7 +19,7 @@
 #else
 #include "backends/imapp_backend_sdl2_opengl3.h"
 #endif
-#include "imapp_platform_state_sdl2.h"
+#include "backends/imapp_platform_state_sdl2.h"
 
 namespace
 {
@@ -53,7 +53,7 @@ namespace
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
-#include "imapp_platform_state_win32.h"
+#include "backends/imapp_platform_state_win32.h"
 
 #ifdef IMGUIX_RENDERER_VULKAN
 #include "backends/imapp_backend_win32_vulkan.h"
