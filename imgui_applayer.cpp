@@ -281,9 +281,18 @@ bool ImGuiApp::Initialize(const ImGuiAppConfig* config)
     if (!cfg.PersistSettings)
         io.IniFilename = nullptr;
 
-    ImGui::StyleColorsDark();
+    ClearColor = cfg.ClearColor;
+
+    switch (cfg.Style)
+    {
+    case ImGuiAppStyle_Light:   ImGui::StyleColorsLight();   break;
+    case ImGuiAppStyle_Classic: ImGui::StyleColorsClassic(); break;
+    default:                          ImGui::StyleColorsDark();    break;
+    }
 
     ImGuiStyle& style = ImGui::GetStyle();
+    if (cfg.FontScale != 0.0f && cfg.FontScale != 1.0f)
+        io.FontGlobalScale = cfg.FontScale;
     if (cfg.DpiScale != 1.0f)
     {
         style.ScaleAllSizes(cfg.DpiScale);
@@ -318,7 +327,9 @@ void ImGuiApp::Shutdown()
 
 ImGuiAppFrameConfig ImGuiApp::OnFrameConfig()
 {
-    return ImGuiAppFrameConfig{};
+    ImGuiAppFrameConfig fc;
+    fc.ClearColor = ClearColor;
+    return fc;
 }
 
 void ImGuiApp::OnDrawFrame()

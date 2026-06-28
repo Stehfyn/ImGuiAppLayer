@@ -341,6 +341,7 @@ struct ImGuiApp : ImGuiAppBase
   ImVector<ImGuiAppWindowBase*>  Windows;
   ImVector<ImGuiAppSidebarBase*> Sidebars;
   ImGuiAppPlatform               Platform;
+  ImVec4                         ClearColor;
   void*                          PlatformData = nullptr;
   bool                           Initialized = false;
 

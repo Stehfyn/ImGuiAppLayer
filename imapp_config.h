@@ -19,6 +19,14 @@ struct ImGuiAppFrameConfig
     ImGuiAppFrameFlags Flags;
 };
 
+enum ImGuiAppStyle_
+{
+    ImGuiAppStyle_Dark    = 0,
+    ImGuiAppStyle_Light   = 1,
+    ImGuiAppStyle_Classic = 2,
+};
+typedef int ImGuiAppStyle;
+
 struct ImGuiAppPlatform
 {
     const char* Name;
@@ -27,11 +35,14 @@ struct ImGuiAppPlatform
 
 struct ImGuiAppConfig
 {
-    ImGuiAppPlatform Platform;
-    ImGuiConfigFlags ConfigFlags;
-    float            DpiScale;
-    bool             PersistSettings;
-    const char*      WindowTitle;
-    int              WindowWidth;
-    int              WindowHeight;
+    ImGuiAppPlatform    Platform;
+    ImGuiConfigFlags    ConfigFlags;
+    ImGuiAppStyle       Style;
+    ImVec4              ClearColor;
+    float               FontScale;
+    float               DpiScale;
+    bool                PersistSettings;
+    const char*         WindowTitle;
+    int                 WindowWidth;
+    int                 WindowHeight;
 };
