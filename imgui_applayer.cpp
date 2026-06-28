@@ -269,6 +269,13 @@ bool ImGuiApp::Initialize(const ImGuiAppConfig* config)
     if (!cfg.PersistSettings)
         io.IniFilename = nullptr;
 
+    switch (cfg.Style)
+    {
+    case ImGuiAppStyle_Light:   ImGui::StyleColorsLight();   break;
+    case ImGuiAppStyle_Classic: ImGui::StyleColorsClassic(); break;
+    default:                    ImGui::StyleColorsDark();    break;
+    }
+
     ClearColor = cfg.ClearColor;
 
     ImGui::InitializeApp(this);
@@ -828,4 +835,3 @@ namespace ImGui
         ShutdownApp(&app);
   }
 }
-
