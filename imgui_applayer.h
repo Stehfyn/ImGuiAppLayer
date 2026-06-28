@@ -202,7 +202,7 @@ struct ImGuiStyleModEx
 
 namespace ImGui
 {
-  IMGUI_API void InitializeApp(ImGuiApp* app);
+  IMGUI_API void InitializeApp(ImGuiApp* app, const ImGuiAppConfig* config = nullptr);
   IMGUI_API void ShutdownApp(ImGuiApp* app);
   IMGUI_API void UpdateApp(ImGuiApp* app);
   IMGUI_API void RenderApp(const ImGuiApp* app);

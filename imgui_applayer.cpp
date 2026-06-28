@@ -264,21 +264,7 @@ bool ImGuiApp::Initialize(const ImGuiAppConfig* config)
     if (!OnInitializePlatform(cfg))
         return false;
 
-    ImGuiIO& io = ImGui::GetIO();
-    io.ConfigFlags |= cfg.ConfigFlags;
-    if (!cfg.PersistSettings)
-        io.IniFilename = nullptr;
-
-    switch (cfg.Style)
-    {
-    case ImGuiAppStyle_Light:   ImGui::StyleColorsLight();   break;
-    case ImGuiAppStyle_Classic: ImGui::StyleColorsClassic(); break;
-    default:                    ImGui::StyleColorsDark();    break;
-    }
-
-    ClearColor = cfg.ClearColor;
-
-    ImGui::InitializeApp(this);
+    ImGui::InitializeApp(this, &cfg);
     Initialized = true;
     return true;
 }
@@ -758,12 +744,29 @@ namespace ImGui
       app->Data.Clear();
   }
 
-  IMGUI_API void InitializeApp(ImGuiApp* app)
+  IMGUI_API void InitializeApp(ImGuiApp* app, const ImGuiAppConfig* config)
   {
       IM_ASSERT(app);
       IM_ASSERT(app->Layers.empty() && "ImGui app already has layers. ShutdownApp() before re-initializing.");
       if (app == nullptr || !app->Layers.empty())
         return;
+
+      if (config != nullptr)
+      {
+        ImGuiIO& io = ImGui::GetIO();
+        io.ConfigFlags |= config->ConfigFlags;
+        if (!config->PersistSettings)
+          io.IniFilename = nullptr;
+
+        switch (config->Style)
+        {
+        case ImGuiAppStyle_Light:   ImGui::StyleColorsLight();   break;
+        case ImGuiAppStyle_Classic: ImGui::StyleColorsClassic(); break;
+        default:                    ImGui::StyleColorsDark();    break;
+        }
+
+        app->ClearColor = config->ClearColor;
+      }
 
       app->ShutdownPending = false;
       PushAppLayer<ImGuiAppTaskLayer>(app);
