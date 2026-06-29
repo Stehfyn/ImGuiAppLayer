@@ -24,8 +24,8 @@ Index of this file:
 #include "imapp_config.h"
 
 // Version (please keep in sync if you bump it)
-#define IMGUI_APPLAYER_VERSION      "0.1.0"
-#define IMGUI_APPLAYER_VERSION_NUM  100
+#define IMGUI_APPLAYER_VERSION      "0.2.0"
+#define IMGUI_APPLAYER_VERSION_NUM  200
 
 #include <mutex>                          // std::call_once
 #include <tuple>                          // 

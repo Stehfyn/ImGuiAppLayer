@@ -5,6 +5,7 @@
 
 #define IMGUI_DEFINE_MATH_OPERATORS
 #include "imgui_applayer.h"
+#include "imgui_applayer_nodes.h"
 #include "imgui_internal.h"
 #include "imnodes.h"
 
@@ -50,7 +51,7 @@ namespace
 
       sv = ImGuiType<decltype(this)>::Name;
 
-      ImStrncpy(data->type, sv.data(), sv.length());
+      ImStrncpy(data->type, sv.data(), sv.length() + 1); // +1: ImStrncpy copies count-1 chars
       ImFormatString(data->label, sizeof(data->label), "%s", data->type);
 
       data->max_timer_secs = GenerateTime();
@@ -128,7 +129,7 @@ namespace
 
       sv = ImGuiType<decltype(this)>::Name;
 
-      ImStrncpy(data->type, sv.data(), sv.length());
+      ImStrncpy(data->type, sv.data(), sv.length() + 1); // +1: ImStrncpy copies count-1 chars
       ImFormatString(data->label, sizeof(data->label), "%s", data->type);
     }
 
@@ -206,14 +207,24 @@ namespace
     }
   };
 
+  // Reflection-capable dataflow payloads: the scalar data that actually flows between nodes.
+  // The live control structs (RandomTimeData/BreathingControlData) carry char[] label/type
+  // buffers, which are outside the reflection subset (reflect miscounts raw arrays), so node
+  // rows reflect these focused aggregates instead. This is the shape codegen will emit.
+  struct RandomTimeNodeData  { float max_timer_secs; };
+  struct BreathingNodeData   { float timer_secs; };
+
   // imnodes data-flow graph: shows the Breathing control's duration input being fed by the
   // Random Time control (its source) when active, or a Default node otherwise.
-  void ShowDataFlowGraph(const ImGuiApp& app, bool show_random_time, bool show_breathing)
+  void ShowDataFlowGraph(ImGuiApp* app, bool show_random_time, bool show_breathing, ImGuiAppNodeDraft* draft,
+                         ImVector<ImGuiAppNodeLink>* links, int* next_link_id)
   {
-    enum { NODE_RT = 1, NODE_DEFAULT, NODE_BREATHING, ATTR_RT_OUT = 10, ATTR_DEFAULT_OUT, ATTR_BR_IN, LINK_SOURCE = 100 };
+    IM_ASSERT(app != nullptr);
 
-    const RandomTimeData*      rt = static_cast<const RandomTimeData*>(app.Data.GetVoidPtr(ImGuiType<RandomTimeData>::ID));
-    const BreathingControlData* br = static_cast<const BreathingControlData*>(app.Data.GetVoidPtr(ImGuiType<BreathingControlData>::ID));
+    enum { NODE_RT = 1, NODE_DEFAULT, NODE_BREATHING, NODE_DRAFT, ATTR_RT_OUT = 10, ATTR_DEFAULT_OUT, ATTR_BR_IN };
+
+    RandomTimeData*             rt = static_cast<RandomTimeData*>(app->Data.GetVoidPtr(ImGuiType<RandomTimeData>::ID));
+    const BreathingControlData* br = static_cast<const BreathingControlData*>(app->Data.GetVoidPtr(ImGuiType<BreathingControlData>::ID));
 
     static bool placed_rt = false, placed_default = false, placed_breathing = false;
 
@@ -223,39 +234,55 @@ namespace
     // origin and later (in EndNodeEditor) calls SetCursorPos(origin) to draw it. Setting the origin
     // after EndNode leaves content at the old origin while the draw cursor jumps to the new one,
     // past the canvas content max -> trips imgui's "extend boundaries" assert.
+    // Node titles come from reflect::type_name; field rows come from reflection over the control's
+    // data struct (DrawAppNodeFields) instead of a hand-listed set of members. Ports still carry the
+    // dataflow semantics (an output "source" on the duration provider, an input on Breathing).
     if (show_random_time)
     {
       if (!placed_rt) { ImNodes::SetNodeGridSpacePos(NODE_RT, ImVec2(24.0f, 24.0f)); placed_rt = true; }
-      ImNodes::BeginNode(NODE_RT);
-      ImNodes::BeginNodeTitleBar(); ImGui::TextUnformatted("Random Time"); ImNodes::EndNodeTitleBar();
-      ImGui::Text("max = %.1f s", rt ? rt->max_timer_secs : 0.0f);
+      ImGui::BeginAppNode(NODE_RT, "Random Time");
+      // Inline edit: reflect the scalar payload, edit it, write the change back to the live control.
+      RandomTimeNodeData rt_node = { rt ? rt->max_timer_secs : 0.0f };
+      if (ImGui::EditAppNodeFields(&rt_node) && rt)
+        rt->max_timer_secs = rt_node.max_timer_secs;
       ImNodes::BeginOutputAttribute(ATTR_RT_OUT); ImGui::TextUnformatted("source"); ImNodes::EndOutputAttribute();
-      ImNodes::EndNode();
+      ImGui::EndAppNode();
     }
     else if (show_breathing)
     {
       if (!placed_default) { ImNodes::SetNodeGridSpacePos(NODE_DEFAULT, ImVec2(24.0f, 24.0f)); placed_default = true; }
-      ImNodes::BeginNode(NODE_DEFAULT);
-      ImNodes::BeginNodeTitleBar(); ImGui::TextUnformatted("Default"); ImNodes::EndNodeTitleBar();
+      ImGui::BeginAppNode(NODE_DEFAULT, "Default");
       ImGui::Text("%.1f s", 5.0f);
       ImNodes::BeginOutputAttribute(ATTR_DEFAULT_OUT); ImGui::TextUnformatted("source"); ImNodes::EndOutputAttribute();
-      ImNodes::EndNode();
+      ImGui::EndAppNode();
     }
 
     if (show_breathing)
     {
       if (!placed_breathing) { ImNodes::SetNodeGridSpacePos(NODE_BREATHING, ImVec2(224.0f, 48.0f)); placed_breathing = true; }
-      ImNodes::BeginNode(NODE_BREATHING);
-      ImNodes::BeginNodeTitleBar(); ImGui::TextUnformatted("Breathing"); ImNodes::EndNodeTitleBar();
+      ImGui::BeginAppNode(NODE_BREATHING, "Breathing");
       ImNodes::BeginInputAttribute(ATTR_BR_IN); ImGui::TextUnformatted("duration"); ImNodes::EndInputAttribute();
-      ImGui::Text("timer = %.1f s", br ? br->timer_secs : 0.0f);
-      ImNodes::EndNode();
+      BreathingNodeData br_node = { br ? br->timer_secs : 0.0f };
+      ImGui::DrawAppNodeFields(&br_node);
+      ImGui::EndAppNode();
     }
 
-    if (show_breathing)
-      ImNodes::Link(LINK_SOURCE, show_random_time ? ATTR_RT_OUT : ATTR_DEFAULT_OUT, ATTR_BR_IN);
+    // Design-phase node: rendered from a runtime draft (no backing C++ type yet).
+    if (draft)
+    {
+      static bool placed_draft = false;
+      if (!placed_draft) { ImNodes::SetNodeGridSpacePos(NODE_DRAFT, ImVec2(224.0f, 200.0f)); placed_draft = true; }
+      ImGui::BeginAppNode(NODE_DRAFT, draft->Name);
+      ImGui::DrawAppNodeDraft(draft);
+      ImGui::EndAppNode();
+    }
+
+    // Links come from the model: the user drags between ports to connect (captured below).
+    ImGui::DrawAppNodeLinks(links);
 
     ImNodes::EndNodeEditor();
+
+    ImGui::CaptureAppNodeLinks(links, next_link_id);
   }
 }
 
@@ -328,14 +355,74 @@ namespace ImGui
       if (show_metrics)
       {
         const float em = ImGui::GetFontSize();
-        ImGui::SetNextWindowSize(ImVec2(em * 32.0f, em * 20.0f), ImGuiCond_FirstUseEver);
+        // Wide enough for the fixed controls column (~em*22) plus a usable graph canvas beside it.
+        // The min-size constraint applies every frame, so it corrects a stale (cramped) size loaded
+        // from imgui.ini, where SetNextWindowSize(..., FirstUseEver) would be ignored.
+        ImGui::SetNextWindowSize(ImVec2(em * 64.0f, em * 34.0f), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSizeConstraints(ImVec2(em * 46.0f, em * 24.0f), ImVec2(FLT_MAX, FLT_MAX));
         if (ImGui::Begin("ImGuiAppLayer Metrics/Debugger", &show_metrics))
         {
+          // A persistent draft the user designs in the inspector below; rendered as a live node.
+          // Links the user drags between ports live in the model alongside it.
+          static ImGuiAppNodeDraft draft;
+          static ImVector<ImGuiAppNodeLink> links;
+          static int next_link_id = 1000;
+          static const char* graph_path = "imguix_node_graph.txt";
+
           const ImGuiIO& io = ImGui::GetIO();
           ImGui::Text("%.1f FPS   Controls: %d   Windows: %d   Sidebars: %d",
               io.Framerate, app.Controls.Size, app.Windows.Size, app.Sidebars.Size);
-          ImGui::TextUnformatted("Data flow (Random Time / Default -> Breathing):");
-          ShowDataFlowGraph(app, show_random_time, show_breathing);
+
+          // Controls live in a fixed-width column to the left of the graph (not stacked below it).
+          ImGui::BeginChild("##NodeControls", ImVec2(em * 22.0f, 0.0f), ImGuiChildFlags_Borders);
+          {
+            if (ImGui::CollapsingHeader("Design Node (draft)", ImGuiTreeNodeFlags_DefaultOpen))
+            {
+              ImGui::EditAppNodeDraft(&draft);
+              if (ImGui::Button("Save graph"))
+                ImGui::SaveAppNodeGraph(graph_path, &draft, &links);
+              ImGui::SameLine();
+              if (ImGui::Button("Load graph"))
+                ImGui::LoadAppNodeGraph(graph_path, &draft, &links);
+            }
+
+            // Generated C++: emit the control skeleton from the draft, view it, write it to a header.
+            if (ImGui::CollapsingHeader("Generated C++", ImGuiTreeNodeFlags_DefaultOpen))
+            {
+              static ImGuiTextBuffer code;
+              static const char* header_path = "imguix_generated_control.h";
+
+              if (ImGui::Button("Generate"))
+              {
+                code.clear();
+                ImGui::GenerateAppControlCode(&draft, &code);
+              }
+              ImGui::SameLine();
+              if (ImGui::Button("Write .h") && code.size() > 0)
+              {
+                if (ImFileHandle fh = ImFileOpen(header_path, "wt"))
+                {
+                  ImFileWrite(code.c_str(), sizeof(char), (ImU64)code.size(), fh);
+                  ImFileClose(fh);
+                }
+              }
+
+              if (code.size() > 0)
+                ImGui::InputTextMultiline("##code", code.Buf.Data, (size_t)code.Buf.Capacity,
+                    ImVec2(-FLT_MIN, em * 12.0f), ImGuiInputTextFlags_ReadOnly);
+            }
+          }
+          ImGui::EndChild();
+
+          ImGui::SameLine();
+
+          // Graph fills the remaining region to the right of the controls column.
+          ImGui::BeginChild("##NodeGraph", ImVec2(0.0f, 0.0f), ImGuiChildFlags_Borders);
+          {
+            ImGui::TextUnformatted("Data flow (drag between ports to connect):");
+            ShowDataFlowGraph(&app, show_random_time, show_breathing, &draft, &links, &next_link_id);
+          }
+          ImGui::EndChild();
         }
         ImGui::End();
       }
