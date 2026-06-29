@@ -307,8 +307,11 @@ namespace ImGui
       if (show_metrics)
       {
         const float em = ImGui::GetFontSize();
-        ImGui::SetNextWindowSize(ImVec2(em * 64.0f, em * 34.0f), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowSizeConstraints(ImVec2(em * 46.0f, em * 24.0f), ImVec2(FLT_MAX, FLT_MAX));
+        // Default size relative to the viewport work area (matches the current docked-full config); used only
+        // when the window is floating -- when docked into the central node it fills that node instead.
+        const ImGuiViewport* mvp = ImGui::GetMainViewport();
+        ImGui::SetNextWindowSize(ImVec2(mvp->WorkSize.x * 0.66f, mvp->WorkSize.y * 0.66f), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSizeConstraints(ImVec2(mvp->WorkSize.x * 0.35f, mvp->WorkSize.y * 0.30f), ImVec2(FLT_MAX, FLT_MAX));
         ImGui::SetNextWindowBgAlpha(1.0f);    // opaque: no other-window text bleeding through the editor
         if (ImGui::Begin("ImGuiAppLayer Metrics/Debugger", &show_metrics))
         {
@@ -318,15 +321,11 @@ namespace ImGui
           static ImGuiAppGraph graph;
           static const char* graph_path = "imguix_node_graph.txt";
           static const char* header_path = "imguix_generated_control.h";
-          static ImGuiTextBuffer code;
+          static ImGuiTextBuffer code;                   // live inspector: generated code for the selected node
           static float code_w = 0.0f;                    // code-panel width; 0 == collapsed (default)
           static char write_msg[64] = "";                // transient "wrote header" confirmation
           static bool show_live = true;                  // show (vs hide -- never delete) the live-mirror nodes
           static int sel = -1;                           // window-level selection shared by tree + canvas (Theme C)
-          static ImGuiID code_sig = 0;                   // authored-graph signature captured at last Generate
-          static bool code_emitted = false;              // has Generate produced output at least once?
-          static ImGuiTextBuffer warn_lines;             // codegen-warning lines captured at last Generate (#20/#21)
-          static int warn_count = 0;
           if (graph.Nodes.empty())
             SeedAppGraph(&graph);
 
@@ -343,11 +342,6 @@ namespace ImGui
           char topo_err[160];
           const bool topo_ok = ImGui::AppGraphTopoOrder(&graph, &topo_order, topo_err, IM_ARRAYSIZE(topo_err));
 
-          // -- Codegen freshness (design B3): the emitted code is stale iff the authored signature drifted since
-          //    the last Generate. Computed once near the top so it drives every freshness surface coherently.
-          const bool stale = code_emitted && ImGui::AppGraphSignature(&graph) != code_sig;
-          if (stale && write_msg[0]) write_msg[0] = 0;   // green "wrote" can never coexist with staleness
-
           // -- One classification pass over the reconciled graph: design / live / promoted counts.
           int n_design = 0, n_live = 0, n_promoted = 0;
           for (int i = 0; i < graph.Nodes.Size; i++)
@@ -356,8 +350,6 @@ namespace ImGui
             if (nn->IsLive) n_live++; else n_design++;
             if (nn->IsPromoted) n_promoted++;
           }
-
-          const ImVec4 kWarn = ImVec4(0.90f, 0.80f, 0.35f, 1.0f);   // amber: stale / warning tint (== fps yellow)
 
           auto ToolSep = [&]()                           // vertical rule between toolbar/strip groups
           {
@@ -421,76 +413,20 @@ namespace ImGui
 
             ToolSep();
 
-            // [Codegen]
-            if (ImGui::Button("Generate"))
-            {
-              code.clear();
-              ImGui::GenerateAppGraphCode(&graph, &code);   // whole graph: structs + deps + bring-up, topo-ordered
-              if (code_w <= 0.0f) code_w = em * 22.0f;   // auto-reveal so output is never hidden
-              write_msg[0] = 0;
-              code_sig = ImGui::AppGraphSignature(&graph);  // freshness baseline
-              code_emitted = true;
-
-              // Scan emitted code for line-leading codegen warnings + a codegen-abort line (#20/#21). The
-              // per-control "// TODO: render widgets" boilerplate is "// TODO", so it never matches "// WARNING".
-              warn_lines.clear();
-              warn_count = 0;
-              for (const char* p = code.c_str(); *p; )
-              {
-                const char* ls = p;
-                while (*ls == ' ' || *ls == '\t') ls++;
-                const char* eol = ls;
-                while (*eol && *eol != '\n') eol++;
-                if (strncmp(ls, "// WARNING", 10) == 0 || strncmp(ls, "// codegen aborted", 18) == 0)
-                {
-                  warn_lines.append(ls, eol);
-                  warn_lines.append("\n");
-                  warn_count++;
-                }
-                p = *eol ? eol + 1 : eol;
-              }
-            }
-            ImGui::SetItemTooltip("Generate C++ from %d node(s)", n_design);   // authored nodes only (#22)
-
-            // Codegen-warning chip: amber (!) N, click for the matched lines. Persists until next Generate.
-            if (warn_count > 0)
-            {
-              ImGui::SameLine();
-              char chip[16]; ImFormatString(chip, IM_ARRAYSIZE(chip), "(!) %d", warn_count);
-              ImGui::PushStyleColor(ImGuiCol_Text, kWarn);
-              const bool open_warn = ImGui::SmallButton(chip);
-              ImGui::PopStyleColor();
-              if (open_warn) ImGui::OpenPopup("##codegenwarn");
-              ImGui::SetItemTooltip("Codegen emitted %d warning(s) -- click to view", warn_count);
-              if (ImGui::BeginPopup("##codegenwarn"))
-              {
-                ImGui::Text("codegen warnings (%d)", warn_count);
-                ImGui::Separator();
-                ImGui::TextUnformatted(warn_lines.c_str());
-                ImGui::EndPopup();
-              }
-            }
-
-            ImGui::SameLine();
-            ImGui::BeginDisabled(code.size() == 0);      // nothing to write until generated
-            if (stale) ImGui::PushStyleColor(ImGuiCol_Text, kWarn);   // warn while the output is stale
+            // [Codegen] No Generate button: the code panel is a LIVE inspector that always shows the selected
+            // node's generated code (regenerated below from `sel`). "Write .h" exports the whole-graph header.
             if (ImGui::Button("Write .h"))
             {
+              ImGuiTextBuffer full;
+              ImGui::GenerateAppGraphCode(&graph, &full);   // whole graph: structs + deps + bring-up, topo-ordered
               if (ImFileHandle fh = ImFileOpen(header_path, "wt"))
               {
-                ImFileWrite(code.c_str(), sizeof(char), (ImU64)code.size(), fh);
+                ImFileWrite(full.c_str(), sizeof(char), (ImU64)full.size(), fh);
                 ImFileClose(fh);
                 ImFormatString(write_msg, IM_ARRAYSIZE(write_msg), "wrote %s", header_path);
               }
             }
-            if (stale) ImGui::PopStyleColor();
-            ImGui::EndDisabled();
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))   // fires even while greyed out
-            {
-              if (code.size() == 0)        ImGui::SetTooltip("Generate code first");
-              else if (stale)              ImGui::SetTooltip("writing STALE output - Generate first");
-              else                         ImGui::SetTooltip("Write generated C++ -> %s", header_path);
-            }
+            ImGui::SetItemTooltip("Write whole-graph C++ -> %s", header_path);
 
             ImGui::SameLine();
             const bool code_open = code_w > 0.0f;        // latch before the button (stack-safe tint)
@@ -498,7 +434,7 @@ namespace ImGui
             if (ImGui::Button(code_open ? "Code v" : "Code >"))
               code_w = code_open ? 0.0f : em * 22.0f;    // mutates code_w, NOT code_open
             if (code_open) ImGui::PopStyleColor();        // gated on the same latch -> always balanced
-            ImGui::SetItemTooltip("Show / hide the generated-code panel");
+            ImGui::SetItemTooltip("Show / hide the generated-code inspector");
 
             ToolSep();
 
@@ -557,14 +493,6 @@ namespace ImGui
             char cb[64];
             ImFormatString(cb, IM_ARRAYSIZE(cb), "L%d W%d S%d C%d", app.Layers.Size, app.Windows.Size, app.Sidebars.Size, app.Controls.Size);
             StatusPill(cb, 0);
-
-            // CODE freshness -- hidden until the first Generate.
-            if (code_emitted)
-            {
-              ToolSep();
-              if (stale) StatusPill("code: STALE", 2);
-              else       StatusPill("code: fresh", 1);
-            }
 
             ToolSep();
             // LIFECYCLE -- the debugger can finally debug the lifecycle.
@@ -667,16 +595,19 @@ namespace ImGui
               ImGui::SameLine(0.0f, 0.0f);
               ImGui::BeginChild("##CodePanel", ImVec2(code_w, 0.0f), ImGuiChildFlags_Borders);
               {
+                // Live inspector: regenerate the selected node's code every frame so edits show instantly.
+                ImGuiAppNode* seln = (sel >= 0) ? ImGui::AppGraphFindNode(&graph, sel) : nullptr;
+                code.clear();
+                if (seln != nullptr)
+                  ImGui::GenerateAppNodeCode(&graph, seln, &code);
+
                 ImGui::AlignTextToFramePadding();
-                if (stale) ImGui::TextColored(kWarn, "Generated C++ - STALE");
-                else       ImGui::TextDisabled("Generated C++");
+                if (seln != nullptr) ImGui::TextDisabled("Generated C++ - %s", seln->Draft.Name);
+                else                 ImGui::TextDisabled("Generated C++");
                 if (code.size() > 0)
                 {
                   ImGui::SameLine();
-                  if (stale) ImGui::PushStyleColor(ImGuiCol_Text, kWarn);
-                  const bool do_copy = ImGui::SmallButton("Copy");
-                  if (stale) ImGui::PopStyleColor();
-                  if (do_copy)
+                  if (ImGui::SmallButton("Copy"))
                     ImGui::SetClipboardText(code.c_str());
                 }
                 if (write_msg[0])
@@ -684,11 +615,11 @@ namespace ImGui
                   ImGui::SameLine();
                   ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.45f, 1.0f), "%s", write_msg);
                 }
-                if (code.size() > 0)
+                if (seln == nullptr)
+                  ImGui::TextDisabled("Select a node to see its generated code.");
+                else
                   ImGui::InputTextMultiline("##code", code.Buf.Data, (size_t)code.Buf.Capacity,
                       ImVec2(-FLT_MIN, -FLT_MIN), ImGuiInputTextFlags_ReadOnly);
-                else
-                  ImGui::TextDisabled("Press Generate to emit control code.");
               }
               ImGui::EndChild();
             }

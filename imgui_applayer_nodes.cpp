@@ -147,6 +147,229 @@ namespace ImGui
       fields->erase(fields->Data + index);
   }
 
+  // Compact row-delete button: an X drawn from two strokes over a hover/active disc, instead of a
+  // SmallButton literally labeled "X" (which read as a stray glyph and crowded the row). Square and
+  // sized to the row's frame height so it lines up with the adjacent InputText/Combo. Returns true on click.
+  static bool AppRowDeleteButton(const char* str_id)
+  {
+    const float sz = ImGui::GetFrameHeight();
+    const ImVec2 pos = ImGui::GetCursorScreenPos();
+    const bool clicked = ImGui::InvisibleButton(str_id, ImVec2(sz, sz));
+    const bool hovered = ImGui::IsItemHovered();
+    const bool held = ImGui::IsItemActive();
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 center = ImVec2(pos.x + sz * 0.5f, pos.y + sz * 0.5f);
+    if (hovered || held)
+      dl->AddCircleFilled(center, sz * 0.5f, ImGui::GetColorU32(held ? ImGuiCol_ButtonActive : ImGuiCol_ButtonHovered));
+
+    // Brighten the cross on hover so it reads as "active delete"; dim at rest so the row isn't noisy.
+    const ImU32 cross = ImGui::GetColorU32(ImGuiCol_Text, (hovered || held) ? 1.0f : 0.55f);
+    const float arm = sz * 0.22f;
+    const float th = ImMax(1.0f, IM_ROUND(sz * 0.09f));
+    dl->AddLine(ImVec2(center.x - arm, center.y - arm), ImVec2(center.x + arm, center.y + arm), cross, th);
+    dl->AddLine(ImVec2(center.x + arm, center.y - arm), ImVec2(center.x - arm, center.y + arm), cross, th);
+    return clicked;
+  }
+
+  //-----------------------------------------------------------------------------
+  // [SECTION] Blender-style field widgets (node body)
+  // Flat, rounded, hover-lit fields. Text: left-aligned, click to edit in place. Enum: centered value with
+  // prev/next step arrows on hover + a dropdown. Int: centered value, horizontal drag to scrub (Shift = fine),
+  // click to type, arrows to step. Self-drawn so the node body reads like Blender's property editor.
+  //-----------------------------------------------------------------------------
+  namespace
+  {
+    const ImU32 kBlFill      = IM_COL32( 88,  88,  88, 255);  // field at rest
+    const ImU32 kBlFillHover = IM_COL32(112, 112, 112, 255);  // hover
+    const ImU32 kBlFillEdit  = IM_COL32( 46,  46,  46, 255);  // recessed while typing
+    const ImU32 kBlBorder    = IM_COL32(  0,   0,   0,  60);  // faint outline
+    const ImU32 kBlText      = IM_COL32(229, 229, 229, 255);
+
+    // Single text/number-edit focus across the whole UI (one at a time), plus the per-active-id drag scratch.
+    ImGuiID g_bl_editing = 0;
+    bool    g_bl_focus_pending = false;
+    ImGuiID g_bl_drag_id = 0;
+    float   g_bl_drag_accum = 0.0f;
+    float   g_bl_press_x = 0.0f;
+    bool    g_bl_dragged = false;
+  }
+
+  // Rounded fill + faint outline; returns the rounding so an in-place editor can match it.
+  static float AppBlFieldBg(ImDrawList* dl, ImVec2 mn, ImVec2 mx, bool hovered, bool editing)
+  {
+    const float r = (mx.y - mn.y) * 0.28f;
+    dl->AddRectFilled(mn, mx, editing ? kBlFillEdit : (hovered ? kBlFillHover : kBlFill), r);
+    dl->AddRect(mn, mx, kBlBorder, r);
+    return r;
+  }
+
+  static void AppBlText(ImDrawList* dl, ImVec2 mn, ImVec2 mx, const char* text, bool centered)
+  {
+    const float pad = (mx.y - mn.y) * 0.30f;
+    const ImVec2 ts = ImGui::CalcTextSize(text);
+    ImVec2 tp(centered ? mn.x + ((mx.x - mn.x) - ts.x) * 0.5f : mn.x + pad,
+              mn.y + ((mx.y - mn.y) - ts.y) * 0.5f);
+    if (tp.x < mn.x + pad) tp.x = mn.x + pad;
+    dl->PushClipRect(mn, mx, true);
+    dl->AddText(tp, kBlText, text);
+    dl->PopClipRect();
+  }
+
+  // Left/right triangles centered in the arrow_w-wide strips at each edge (drawn only on hover).
+  static void AppBlStepArrows(ImDrawList* dl, ImVec2 mn, ImVec2 mx, float arrow_w)
+  {
+    const float cy = (mn.y + mx.y) * 0.5f;
+    const float a = (mx.y - mn.y) * 0.16f;
+    const float lx = mn.x + arrow_w * 0.5f, rx = mx.x - arrow_w * 0.5f;
+    dl->AddTriangleFilled(ImVec2(lx + a, cy - a), ImVec2(lx + a, cy + a), ImVec2(lx - a, cy), kBlText);
+    dl->AddTriangleFilled(ImVec2(rx - a, cy - a), ImVec2(rx - a, cy + a), ImVec2(rx + a, cy), kBlText);
+  }
+
+  // Flat rounded text field: left-aligned at rest, click to edit in place.
+  static bool AppBlInputText(const char* str_id, char* buf, size_t buf_size, float width)
+  {
+    const float h = ImGui::GetFrameHeight();
+    const ImVec2 mn = ImGui::GetCursorScreenPos();
+    const ImVec2 mx(mn.x + width, mn.y + h);
+    const ImGuiID id = ImGui::GetID(str_id);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    bool changed = false;
+
+    if (g_bl_editing == id)
+    {
+      const float r = AppBlFieldBg(dl, mn, mx, true, true);
+      ImGui::SetCursorScreenPos(mn);
+      ImGui::SetNextItemWidth(width);
+      ImGui::PushStyleColor(ImGuiCol_FrameBg, 0);
+      ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, 0);
+      ImGui::PushStyleColor(ImGuiCol_FrameBgActive, 0);
+      ImGui::PushStyleColor(ImGuiCol_Text, kBlText);
+      ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, r);
+      if (g_bl_focus_pending) { ImGui::SetKeyboardFocusHere(); g_bl_focus_pending = false; }
+      ImGui::PushID(id);
+      changed = ImGui::InputText("##e", buf, buf_size, ImGuiInputTextFlags_AutoSelectAll);
+      const bool done = ImGui::IsItemDeactivated();
+      ImGui::PopID();
+      ImGui::PopStyleVar();
+      ImGui::PopStyleColor(4);
+      if (done) g_bl_editing = 0;
+    }
+    else
+    {
+      ImGui::InvisibleButton(str_id, ImVec2(width, h));
+      const bool hovered = ImGui::IsItemHovered();
+      AppBlFieldBg(dl, mn, mx, hovered, false);
+      AppBlText(dl, mn, mx, buf, false);
+      if (ImGui::IsItemActivated()) { g_bl_editing = id; g_bl_focus_pending = true; }
+      if (hovered) ImGui::SetMouseCursor(ImGuiMouseCursor_TextInput);
+    }
+    return changed;
+  }
+
+  // Flat rounded enum: centered value, hover shows L/R step arrows (click edges to step), click center for dropdown.
+  static bool AppBlEnum(const char* str_id, float width, int* v, const char* (*name_of)(int), int count)
+  {
+    const float h = ImGui::GetFrameHeight();
+    const ImVec2 mn = ImGui::GetCursorScreenPos();
+    const ImVec2 mx(mn.x + width, mn.y + h);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    bool changed = false;
+
+    ImGui::InvisibleButton(str_id, ImVec2(width, h));
+    const bool hovered = ImGui::IsItemHovered();
+    AppBlFieldBg(dl, mn, mx, hovered, false);
+    const float arrow_w = h * 0.7f;
+    if (hovered) AppBlStepArrows(dl, mn, mx, arrow_w);
+    AppBlText(dl, mn, mx, name_of(*v), true);
+
+    if (ImGui::IsItemActivated())
+    {
+      const float rx = ImGui::GetIO().MousePos.x - mn.x;
+      if (rx < arrow_w)             { *v = (*v - 1 + count) % count; changed = true; }
+      else if (rx > width - arrow_w){ *v = (*v + 1) % count;        changed = true; }
+      else                            ImGui::OpenPopup(str_id);
+    }
+    if (hovered) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    if (ImGui::BeginPopup(str_id))
+    {
+      for (int i = 0; i < count; i++)
+        if (ImGui::Selectable(name_of(i), i == *v)) { *v = i; changed = true; }
+      ImGui::EndPopup();
+    }
+    return changed;
+  }
+
+  // Flat rounded int: drag horizontally to scrub (Shift = fine), click edges to step, click center to type.
+  static bool AppBlDragInt(const char* str_id, float width, int* v, int vmin, int vmax)
+  {
+    const float h = ImGui::GetFrameHeight();
+    const ImVec2 mn = ImGui::GetCursorScreenPos();
+    const ImVec2 mx(mn.x + width, mn.y + h);
+    const ImGuiID id = ImGui::GetID(str_id);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    bool changed = false;
+
+    if (g_bl_editing == id)
+    {
+      const float r = AppBlFieldBg(dl, mn, mx, true, true);
+      ImGui::SetCursorScreenPos(mn);
+      ImGui::SetNextItemWidth(width);
+      ImGui::PushStyleColor(ImGuiCol_FrameBg, 0);
+      ImGui::PushStyleColor(ImGuiCol_Text, kBlText);
+      ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, r);
+      if (g_bl_focus_pending) { ImGui::SetKeyboardFocusHere(); g_bl_focus_pending = false; }
+      ImGui::PushID(id);
+      changed = ImGui::InputInt("##e", v, 0, 0, ImGuiInputTextFlags_AutoSelectAll);
+      const bool done = ImGui::IsItemDeactivated();
+      ImGui::PopID();
+      ImGui::PopStyleVar();
+      ImGui::PopStyleColor(2);
+      if (done) g_bl_editing = 0;
+      *v = ImClamp(*v, vmin, vmax);
+      return changed;
+    }
+
+    ImGui::InvisibleButton(str_id, ImVec2(width, h));
+    const bool hovered = ImGui::IsItemHovered();
+    const bool active = ImGui::IsItemActive();
+    AppBlFieldBg(dl, mn, mx, hovered || active, false);
+    const float arrow_w = h * 0.7f;
+
+    if (ImGui::IsItemActivated())
+    {
+      g_bl_drag_id = id; g_bl_drag_accum = 0.0f; g_bl_dragged = false;
+      g_bl_press_x = ImGui::GetIO().MousePos.x - mn.x;
+    }
+    if (active && g_bl_drag_id == id)
+    {
+      const float dx = ImGui::GetIO().MouseDelta.x;
+      if (!g_bl_dragged && ImAbs(ImGui::GetIO().MousePos.x - mn.x - g_bl_press_x) > 3.0f) g_bl_dragged = true;
+      if (g_bl_dragged && dx != 0.0f)
+      {
+        g_bl_drag_accum += dx * (ImGui::GetIO().KeyShift ? 0.05f : 0.25f);
+        const int d = (int)g_bl_drag_accum;
+        if (d != 0) { *v = ImClamp(*v + d, vmin, vmax); g_bl_drag_accum -= d; changed = true; }
+      }
+      ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+    }
+    if (ImGui::IsItemDeactivated() && g_bl_drag_id == id)
+    {
+      if (!g_bl_dragged)
+      {
+        if (g_bl_press_x < arrow_w)              { *v = ImClamp(*v - 1, vmin, vmax); changed = true; }
+        else if (g_bl_press_x > width - arrow_w) { *v = ImClamp(*v + 1, vmin, vmax); changed = true; }
+        else                                     { g_bl_editing = id; g_bl_focus_pending = true; }
+      }
+      g_bl_drag_id = 0;
+    }
+
+    if (hovered && !active) { AppBlStepArrows(dl, mn, mx, arrow_w); ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW); }
+    char lbl[32]; ImFormatString(lbl, IM_ARRAYSIZE(lbl), "%d", *v);
+    AppBlText(dl, mn, mx, lbl, true);
+    return changed;
+  }
+
   // Shared field-list editor used for both the persist and temp sets.
   static void EditAppFieldList(const char* list_label, ImVector<ImGuiAppFieldDesc>* fields)
   {
@@ -160,21 +383,24 @@ namespace ImGui
       ImGuiAppFieldDesc* f = &fields->Data[i];
       ImGui::PushID(i);
 
-      ImGui::SetNextItemWidth(ImGui::GetFontSize() * 8.0f);
-      ImGui::InputText("##name", f->Name, IM_ARRAYSIZE(f->Name));
+      const float em = ImGui::GetFontSize();
+      AppBlInputText("##name", f->Name, IM_ARRAYSIZE(f->Name), em * 8.0f);
 
       ImGui::SameLine();
-      ImGui::SetNextItemWidth(ImGui::GetFontSize() * 5.0f);
-      if (ImGui::BeginCombo("##type", AppFieldTypeName(f->Type)))
+      int t = (int)f->Type;
+      if (AppBlEnum("##type", em * 5.0f, &t, &AppFieldTypeName, ImGuiAppFieldType_COUNT))
+        f->Type = (ImGuiAppFieldType)t;
+
+      // String fields carry a buffer length -> a Blender drag-int for char[ArraySize].
+      if (f->Type == ImGuiAppFieldType_String)
       {
-        for (int t = 0; t < ImGuiAppFieldType_COUNT; t++)
-          if (ImGui::Selectable(AppFieldTypeName((ImGuiAppFieldType)t), f->Type == t))
-            f->Type = (ImGuiAppFieldType)t;
-        ImGui::EndCombo();
+        if (f->ArraySize <= 0) f->ArraySize = 128;
+        ImGui::SameLine();
+        AppBlDragInt("##size", em * 4.0f, &f->ArraySize, 1, 65536);
       }
 
       ImGui::SameLine();
-      if (ImGui::SmallButton("X"))
+      if (AppRowDeleteButton("##del"))
       {
         AppNodeDraftRemoveField(fields, i);
         ImGui::PopID();
@@ -680,36 +906,6 @@ namespace ImGui
     return h > 1.0f ? h : kAppGraphLayerRowH;
   }
 
-  static int AppGraphLayerStackIndex(ImGuiAppGraph* g, bool show_live, int node_id, int* out_count)
-  {
-    ImVector<int> ids;
-    AppGraphCollectVisibleLayerStack(g, show_live, &ids);
-    if (out_count != nullptr)
-      *out_count = ids.Size;
-
-    for (int i = 1; i < ids.Size; i++)
-    {
-      const int id = ids.Data[i];
-      ImGuiAppNode* n = AppGraphFindNodeById(g, id);
-      const float y = n ? n->GridPos.y : 0.0f;
-      int j = i - 1;
-      while (j >= 0)
-      {
-        ImGuiAppNode* prev = AppGraphFindNodeById(g, ids.Data[j]);
-        if (prev == nullptr || prev->GridPos.y <= y)
-          break;
-        ids.Data[j + 1] = ids.Data[j];
-        j--;
-      }
-      ids.Data[j + 1] = id;
-    }
-
-    for (int i = 0; i < ids.Size; i++)
-      if (ids.Data[i] == node_id)
-        return i;
-    return -1;
-  }
-
   static void AppGraphConstrainLayerColumn(ImGuiAppGraph* g, bool show_live, int anchor_node_id, const ImVec2* anchor_pos)
   {
     ImVector<int> ids;
@@ -718,14 +914,37 @@ namespace ImGui
       return;
 
     const float x = kAppGraphX0;
+    const float gap = 12.0f;
 
+    // Default placement: pack the stack tight -- each fresh node sits directly below the previous one,
+    // separated by exactly `gap`, using actual node heights (not a fixed row pitch that left big holes).
+    // imnodes reports a node's height as ~0 until it has been submitted once, so AppGraphLayerNodeHeight
+    // falls back to kAppGraphLayerRowH on the first frame. Only FINALIZE (HasGridPos) once every fresh
+    // node's height is real; otherwise keep the placement provisional and re-pack next frame with true
+    // heights -- finalizing early would freeze the fallback pitch and leave the holes we're removing.
+    bool all_heights_known = true;
     for (int i = 0; i < ids.Size; i++)
     {
       ImGuiAppNode* n = AppGraphFindNodeById(g, ids.Data[i]);
-      if (n == nullptr || n->HasGridPos)
+      if (n != nullptr && !n->HasGridPos && ImNodes::GetNodeDimensions(n->Id).y <= 1.0f)
+      {
+        all_heights_known = false;
+        break;
+      }
+    }
+    float pack_y = kAppGraphY0;
+    for (int i = 0; i < ids.Size; i++)
+    {
+      ImGuiAppNode* n = AppGraphFindNodeById(g, ids.Data[i]);
+      if (n == nullptr)
         continue;
-      n->GridPos = ImVec2(x, kAppGraphY0 + (1 + i) * kAppGraphLayerRowH);
-      n->HasGridPos = true;
+      if (!n->HasGridPos)
+      {
+        n->GridPos = ImVec2(x, pack_y);
+        if (all_heights_known)
+          n->HasGridPos = true;
+      }
+      pack_y = n->GridPos.y + AppGraphLayerNodeHeight(n->Id) + gap;
     }
 
     for (int i = 1; i < ids.Size; i++)
@@ -754,7 +973,6 @@ namespace ImGui
           break;
         }
 
-    const float gap = 12.0f;
     const bool anchor_is_interior = anchor_node_id != 0 && anchor_pos != nullptr && anchor_index > 0 && anchor_index + 1 < ids.Size;
     if (anchor_node_id != 0 && anchor_pos != nullptr)
     {
@@ -817,7 +1035,8 @@ namespace ImGui
         continue;
       const ImVec2 pos(x, n->GridPos.y);
       n->GridPos = pos;
-      n->HasGridPos = true;
+      // Do NOT force HasGridPos here: a node placed provisionally this frame (heights not yet known)
+      // must stay un-finalized so the default-placement pass re-packs it next frame with real heights.
       n->_NeedsPlace = true;
       ImNodes::SetNodeGridSpacePos(n->Id, pos);
     }
@@ -826,7 +1045,10 @@ namespace ImGui
   static void AppGraphPlaceNode(ImGuiAppGraph* g, ImGuiAppNode* n, const ImVec2* preferred)
   {
     n->GridPos = AppGraphFindOpenPlacement(g, n, preferred ? *preferred : ImVec2(0.0f, 0.0f), preferred != nullptr);
-    n->HasGridPos = true;
+    // Layer nodes live in the tight-packed master column -- leave them UN-finalized so AppGraphConstrainLayerColumn
+    // owns their Y (each layer packed directly below the previous by real height). Finalizing here froze the 145px
+    // grid pitch FindOpenPlacement uses, which left big holes between layers ("not packed").
+    n->HasGridPos = (n->Kind != ImGuiAppNodeKind_Layer);
     n->_NeedsPlace = true;
   }
 
@@ -1015,21 +1237,14 @@ namespace ImGui
     for (int i = 0; i < n->Commands.Size; i++)
     {
       ImGui::PushID(i);
-      ImGui::SetNextItemWidth(ImGui::GetFontSize() * 16.0f);
-      ImGui::InputText("##cmd", n->Commands.Data[i].Name, IM_ARRAYSIZE(n->Commands.Data[i].Name));
-      ImGui::SameLine();
+      AppBlInputText("##cmd", n->Commands.Data[i].Name, IM_ARRAYSIZE(n->Commands.Data[i].Name), ImGui::GetFontSize() * 16.0f);
       if (AppNodeCommandNameUsed(n, n->Commands.Data[i].Name, i))
       {
+        ImGui::SameLine();
         ImGui::TextDisabled("duplicate");
       }
-      else
-      {
-        char enum_name[IM_LABEL_SIZE];
-        AppSanitizeIdentifier(enum_name, IM_ARRAYSIZE(enum_name), n->Commands.Data[i].Name);
-        ImGui::TextDisabled("AppCommand_%s", enum_name);
-      }
       ImGui::SameLine();
-      if (ImGui::SmallButton("X"))
+      if (AppRowDeleteButton("##del"))
         remove = i;
       ImGui::PopID();
     }
@@ -1083,7 +1298,7 @@ namespace ImGui
         ImGui::EndCombo();
       }
       ImGui::SameLine();
-      if (ImGui::SmallButton("X"))
+      if (AppRowDeleteButton("##del"))
         remove = i;
       ImGui::PopID();
     }
@@ -1351,14 +1566,11 @@ namespace ImGui
       if (g->Bindings.Data[i].LinkId != link_id)
         continue;
       ImGui::PushID(row++);
-      ImGui::SetNextItemWidth(ImGui::GetFontSize() * 6.0f);
-      ImGui::InputText("##dst", g->Bindings.Data[i].DstField, IM_ARRAYSIZE(g->Bindings.Data[i].DstField));
-      ImGui::SameLine(); ImGui::TextUnformatted("=");
+      AppBlInputText("##dst", g->Bindings.Data[i].DstField, IM_ARRAYSIZE(g->Bindings.Data[i].DstField), ImGui::GetFontSize() * 6.0f);
+      ImGui::SameLine(); ImGui::AlignTextToFramePadding(); ImGui::TextUnformatted("="); ImGui::SameLine();
+      AppBlInputText("##src", g->Bindings.Data[i].SrcField, IM_ARRAYSIZE(g->Bindings.Data[i].SrcField), ImGui::GetFontSize() * 6.0f);
       ImGui::SameLine();
-      ImGui::SetNextItemWidth(ImGui::GetFontSize() * 6.0f);
-      ImGui::InputText("##src", g->Bindings.Data[i].SrcField, IM_ARRAYSIZE(g->Bindings.Data[i].SrcField));
-      ImGui::SameLine();
-      if (ImGui::SmallButton("X"))
+      if (AppRowDeleteButton("##del"))
         remove = i;
       ImGui::PopID();
     }
@@ -1504,6 +1716,10 @@ namespace ImGui
     static int dragging_id = 0;
     static float drag_start_mouse_y = 0.0f;
     static float drag_start_node_y = 0.0f;
+    // Clamp edges captured at grab time (neighbor positions move during the drag, so we must not
+    // re-sample them). top layer -> top of the node below; bottom layer -> bottom of the node above.
+    static float drag_clamp_max_y = FLT_MAX;   // top layer can't move below this
+    static float drag_clamp_min_y = -FLT_MAX;  // bottom layer can't move above this
 
     if (out_anchor_id != nullptr) *out_anchor_id = 0;
     if (out_anchor_pos != nullptr) *out_anchor_pos = ImVec2(0.0f, 0.0f);
@@ -1520,6 +1736,37 @@ namespace ImGui
         dragging_id = n->Id;
         drag_start_mouse_y = ImGui::GetIO().MousePos.y;
         drag_start_node_y = ImNodes::GetNodeGridSpacePos(n->Id).y;
+
+        // Capture the immediate neighbor edges by POSITION (no stack-index detection -- that misfired and
+        // left a boundary node unclamped, letting the master constrain cascade-push the whole box). The
+        // dragged node may approach but not overlap either neighbor, so the constrain never shoves the stack.
+        //   - nearest node ABOVE  -> bottom of dragged stays >  that node's bottom  (min_y)
+        //   - nearest node BELOW  -> bottom of dragged stays <  that node's top     (max_y)
+        // A missing neighbor leaves the bound at +/-inf (top node free upward, bottom node free downward).
+        drag_clamp_max_y = FLT_MAX;
+        drag_clamp_min_y = -FLT_MAX;
+        const float self_h = AppGraphLayerNodeHeight(n->Id);
+        float above_y = -FLT_MAX, above_bottom = 0.0f;
+        float below_y = FLT_MAX;
+        for (int i = 0; i < g->Nodes.Size; i++)
+        {
+          const ImGuiAppNode* o = &g->Nodes.Data[i];
+          if (o->Id == n->Id || o->Kind != ImGuiAppNodeKind_Layer || (!show_live && o->IsLive))
+            continue;
+          if (o->GridPos.y < drag_start_node_y && o->GridPos.y > above_y)
+          {
+            above_y = o->GridPos.y;
+            above_bottom = o->GridPos.y + AppGraphLayerNodeHeight(o->Id);
+          }
+          if (o->GridPos.y > drag_start_node_y && o->GridPos.y < below_y)
+            below_y = o->GridPos.y;
+        }
+        // Use the SAME inter-node gap the master constrain enforces (12px). A tighter clamp (e.g. 1px)
+        // lets the dragged node enter the constrain's gap zone, so the constrain shoves the whole stack
+        // to restore its 12px spacing -- which looked like "the box moves with the drag".
+        const float gap = 12.0f;
+        if (above_y != -FLT_MAX) drag_clamp_min_y = above_bottom + gap;
+        if (below_y != FLT_MAX)  drag_clamp_max_y = below_y - self_h - gap;
       }
     }
 
@@ -1529,12 +1776,8 @@ namespace ImGui
       if (n != nullptr)
       {
         float y = drag_start_node_y + (ImGui::GetIO().MousePos.y - drag_start_mouse_y);
-        int layer_count = 0;
-        const int layer_index = AppGraphLayerStackIndex(g, show_live, n->Id, &layer_count);
-        if (layer_count > 1 && layer_index == 0 && y > drag_start_node_y)
-          y = drag_start_node_y;
-        if (layer_count > 1 && layer_index == layer_count - 1 && y < drag_start_node_y)
-          y = drag_start_node_y;
+        if (y > drag_clamp_max_y) y = drag_clamp_max_y;
+        if (y < drag_clamp_min_y) y = drag_clamp_min_y;
         const ImVec2 pos(kAppGraphX0, y);
         AppGraphConstrainLayerColumn(g, show_live, n->Id, &pos);
 
@@ -1561,6 +1804,13 @@ namespace ImGui
         if (g->Nodes.Data[i].IsLive)
           g->Nodes.Data[i]._NeedsPlace = true;
     prev_show_live = show_live;
+
+    // Drive the layer vertical drag BEFORE submission so the clamped position lands in THIS frame's
+    // placement (the handler sets _NeedsPlace). Running it after EndNodeEditor lagged a frame, letting a
+    // fast drag render one unclamped frame before snapping back. Hover state is from last frame -- fine.
+    int dragged_layer_id = 0;
+    ImVec2 dragged_layer_pos(0.0f, 0.0f);
+    AppHandleLayerVerticalDrag(g, show_live, &dragged_layer_id, &dragged_layer_pos);
 
     ImNodes::BeginNodeEditor();
 
@@ -1710,9 +1960,6 @@ namespace ImGui
     // and jump to nodes that sit past the visible canvas edge.
     ImNodes::MiniMap(0.2f, ImNodesMiniMapLocation_BottomRight);
     ImNodes::EndNodeEditor();
-    int dragged_layer_id = 0;
-    ImVec2 dragged_layer_pos(0.0f, 0.0f);
-    AppHandleLayerVerticalDrag(g, show_live, &dragged_layer_id, &dragged_layer_pos);
 
     // Persist canvas layout for save/load. Skip hidden live nodes: they were not submitted, so a read-back
     // would assert; skipping also correctly retains each hidden node's last-shown GridPos.
@@ -1730,7 +1977,11 @@ namespace ImGui
         moved_layer_pos = pos;
       }
       n->GridPos = pos;
-      n->HasGridPos = true;
+      // Don't finalize layer nodes here: the tight-packer (AppGraphConstrainLayerColumn, below) sets HasGridPos
+      // once their real heights are known. Force-finalizing every frame defeated the packer's deferred-finalize
+      // and froze the fallback-height (145px) gaps -- the master column stopped re-packing tight.
+      if (n->Kind != ImGuiAppNodeKind_Layer)
+        n->HasGridPos = true;
     }
     if (dragged_layer_id != 0)
     {
@@ -1908,14 +2159,30 @@ namespace ImGui
     ImFormatString(out, (int)out_size, "AppCommand_%s", base);
   }
 
-  static void AppEmitCommandEnumAndApp(const ImGuiAppGraph* g, ImGuiTextBuffer* out)
+  // Just the AppCommand enum folded from every CommandLayer's command list (no app shell).
+  static void AppEmitCommandEnum(const ImGuiAppGraph* g, ImGuiTextBuffer* out)
   {
     if (AppGraphCommandDefinitionCount(g) == 0)
       return;
 
-    out->appendf("enum ClientAppCommand\n{\n");
-    out->appendf("  AppCommand_None = ImGuiAppCommand_None,\n");
-    out->appendf("  AppCommand_Shutdown = ImGuiAppCommand_Shutdown,\n");
+    // Align the '=' column: width = the longest enumerator name carrying an initializer.
+    int w = (int)strlen("AppCommand_None");
+    if ((int)strlen("AppCommand_Shutdown") > w) w = (int)strlen("AppCommand_Shutdown");
+    for (int i = 0; i < g->Nodes.Size; i++)
+    {
+      const ImGuiAppNode* n = &g->Nodes.Data[i];
+      if (!AppNodeIsCommandLayer(n)) continue;
+      for (int c = 0; c < n->Commands.Size; c++)
+      {
+        char enum_value[IM_LABEL_SIZE];
+        AppCommandEnumValue(&n->Commands.Data[c], enum_value, IM_ARRAYSIZE(enum_value));
+        if ((int)strlen(enum_value) > w) w = (int)strlen(enum_value);
+      }
+    }
+
+    out->appendf("enum AppCommand\n{\n");
+    out->appendf("  %-*s = ImGuiAppCommand_None,\n", w, "AppCommand_None");
+    out->appendf("  %-*s = ImGuiAppCommand_Shutdown,\n", w, "AppCommand_Shutdown");
     int offset = 0;
     for (int i = 0; i < g->Nodes.Size; i++)
     {
@@ -1925,14 +2192,22 @@ namespace ImGui
       {
         char enum_value[IM_LABEL_SIZE];
         AppCommandEnumValue(&n->Commands.Data[c], enum_value, IM_ARRAYSIZE(enum_value));
-        out->appendf("  %s = ImGuiAppCommand_COUNT + %d,\n", enum_value, offset++);
+        out->appendf("  %-*s = ImGuiAppCommand_COUNT + %d,\n", w, enum_value, offset++);
       }
     }
     out->appendf("  AppCommand_COUNT\n};\n\n");
+  }
+
+  static void AppEmitCommandEnumAndApp(const ImGuiAppGraph* g, ImGuiTextBuffer* out)
+  {
+    if (AppGraphCommandDefinitionCount(g) == 0)
+      return;
+
+    AppEmitCommandEnum(g, out);
 
     out->appendf("struct ClientApp : ImGuiApp\n{\n");
     out->appendf("  virtual void OnExecuteCommand(ImGuiAppCommand cmd) override\n  {\n");
-    out->appendf("    switch ((ClientAppCommand)cmd)\n    {\n");
+    out->appendf("    switch ((AppCommand)cmd)\n    {\n");
     for (int i = 0; i < g->Nodes.Size; i++)
     {
       const ImGuiAppNode* n = &g->Nodes.Data[i];
@@ -2296,6 +2571,50 @@ namespace ImGui
         out->appendf("  PushAppControl<%s>(app);\n", base);
     }
     out->appendf("}\n");
+  }
+
+  void GenerateAppNodeCode(const ImGuiAppGraph* g, const ImGuiAppNode* n, ImGuiTextBuffer* out)
+  {
+    IM_ASSERT(g != nullptr && n != nullptr && out != nullptr);
+
+    switch (n->Kind)
+    {
+    case ImGuiAppNodeKind_Control:
+      AppEmitControlWithDeps(g, n, out);            // data structs + control struct with derived deps/bindings
+      break;
+    case ImGuiAppNodeKind_Layer:
+      if (AppNodeIsCommandLayer(n))
+        AppEmitCommandEnum(g, out);                 // just the AppCommand enum (the user's example)
+      else
+        out->appendf("// '%s' is a framework %s layer -- no generated type, just bring-up:\n"
+                     "PushAppLayer<%s>(app);\n",
+                     n->Draft.Name, AppLayerTypeName(n->LayerType), AppLayerTypeName(n->LayerType));
+      break;
+    case ImGuiAppNodeKind_Window:
+    {
+      char base[IM_LABEL_SIZE]; AppNodeBaseName(n, base, IM_ARRAYSIZE(base));
+      out->appendf("// Window '%s' bring-up:\nPushAppWindow<%s>(app);\n", n->Draft.Name, base);
+      break;
+    }
+    case ImGuiAppNodeKind_Sidebar:
+    {
+      char base[IM_LABEL_SIZE]; AppNodeBaseName(n, base, IM_ARRAYSIZE(base));
+      out->appendf("// Sidebar '%s' bring-up:\nPushAppSidebar<%s>(app, vp, ImGuiDir_Down, 0.0f, ImGuiWindowFlags_None);\n", n->Draft.Name, base);
+      break;
+    }
+    case ImGuiAppNodeKind_App:
+    default:
+      GenerateAppGraphCode(g, out);                 // App node == the whole composition
+      break;
+    }
+
+    if (out->size() == 0)
+    {
+      if (n->Kind == ImGuiAppNodeKind_Layer && AppNodeIsCommandLayer(n))
+        out->appendf("// CommandLayer has no commands yet -- add commands to generate AppCommand.\n");
+      else
+        out->appendf("// no code generated for this node.\n");
+    }
   }
 
   //-----------------------------------------------------------------------------

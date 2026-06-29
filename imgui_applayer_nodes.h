@@ -490,6 +490,11 @@ namespace ImGui
   // function pushing layers, then windows/sidebars, then controls. Appends to *out.
   IMGUI_API void                GenerateAppGraphCode(const ImGuiAppGraph* g, ImGuiTextBuffer* out);
 
+  // Per-node codegen for the inspector: emits only the code a single selected node produces -- a Control's
+  // struct(s) with derived deps, the CommandLayer's ClientAppCommand enum + dispatch, a window/sidebar/layer
+  // bring-up line, or (App node) the whole composition. Appends to *out.
+  IMGUI_API void                GenerateAppNodeCode(const ImGuiAppGraph* g, const ImGuiAppNode* n, ImGuiTextBuffer* out);
+
   // Persist / restore the whole graph as imgui-style text. LoadAppGraph also ingests the legacy single/multi
   // "[Draft]" format (each becomes a Control node). The four legacy Save/Load*Graph[Multi] functions above are
   // unchanged. Return false on file error.
