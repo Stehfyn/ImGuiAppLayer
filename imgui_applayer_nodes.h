@@ -270,9 +270,9 @@ enum ImGuiAppLayerType_
 };
 
 // A port is an imnodes attribute with a role. DataOut/DataIn carry the runtime data flow; ChildOut/ChildIn
-// carry containment (which window/sidebar/app owns a node). A Control has one DataOut (its PersistData), one
-// multi-link DataIn (all its dependencies -- the runtime keys app->Data by PersistData TYPE, so one type-keyed
-// intake is faithful), and one ChildOut.
+// carry containment (which window/sidebar/app owns a node). Layers are root composition slots and have no
+// containment sockets. A Control has one DataOut (its PersistData), one multi-link DataIn (all its dependencies
+// -- the runtime keys app->Data by PersistData TYPE, so one type-keyed intake is faithful), and one ChildOut.
 typedef int ImGuiAppPortKind;
 enum ImGuiAppPortKind_
 {
@@ -358,6 +358,13 @@ struct ImGuiAppNodePort
   ImGuiAppNodePort() { Id = 0; Kind = ImGuiAppPortKind_DataOut; Name[0] = 0; DataTypeId = 0; }
 };
 
+struct ImGuiAppCommandDesc
+{
+  char Name[IM_LABEL_SIZE];
+
+  ImGuiAppCommandDesc() { ImStrncpy(Name, "NewCommand", IM_ARRAYSIZE(Name)); }
+};
+
 // One node in the authored graph. Embeds ImGuiAppNodeDraft so the existing rename/field-edit/codegen
 // helpers apply verbatim and a legacy "[Draft]" maps 1:1 to a Control node. Most fields are kind-specific.
 struct ImGuiAppNode
@@ -382,6 +389,7 @@ struct ImGuiAppNode
   bool              IsLive;         // mirrored from a running app object (read-only)
   bool              IsPromoted;     // design control whose emitted data type matches a live node (transient)
   ImGuiID           LiveKey;        // stable upsert key for a live node (so its position survives re-mirroring)
+  ImVector<ImGuiAppCommandDesc> Commands; // CommandLayer: definitions. Control: selected commands emitted by OnGetCommand.
   ImVector<ImGuiAppNodePort> Ports;
 
   ImGuiAppNode()
@@ -414,8 +422,10 @@ struct ImGuiAppGraph
   ImVector<ImGuiAppFieldBinding> Bindings;
   int NextId;
   int EditingNodeId;             // node whose title is being renamed inline, or -1
+  char LastLinkErr[IM_LABEL_SIZE];  // last refused-link reason; transient UI state, NOT in Save/Load
+  int  LastLinkErrSeq;              // bumped on every rejection -> demo edge-triggers the fade
 
-  ImGuiAppGraph() { NextId = 1; EditingNodeId = -1; }
+  ImGuiAppGraph() { NextId = 1; EditingNodeId = -1; LastLinkErr[0] = 0; LastLinkErrSeq = 0; }
 };
 
 namespace ImGui
@@ -429,10 +439,18 @@ namespace ImGui
   IMGUI_API void                AppGraphRemoveNode(ImGuiAppGraph* g, int node_id);
   IMGUI_API ImGuiAppNode*       AppGraphFindNode(ImGuiAppGraph* g, int node_id);
   IMGUI_API ImGuiAppNodePort*   AppGraphFindPort(ImGuiAppGraph* g, int port_id, ImGuiAppNode** out_owner);
+  IMGUI_API bool                AppGraphHasLayerType(const ImGuiAppGraph* g, ImGuiAppLayerType type);
+  IMGUI_API void                AppNodeAddCommand(ImGuiAppNode* n, const char* name);
+  IMGUI_API void                AppNodeRemoveCommand(ImGuiAppNode* n, int index);
 
   // The runtime data-flow key for a node named <node_name>: ConstantHash of the sanitized "<Name>Data" the
   // codegen emits -- equals ImGuiType<<Name>Data>::ID, so a design DataOut port shares the live storage key.
   IMGUI_API ImGuiID             AppNodeStructTypeId(const char* node_name);
+
+  // Stable fold of the codegen-DETERMINING authored (!IsLive) graph state: changes iff the emitted C++ would
+  // change, so a panel can show fresh|STALE. Excludes positions/ids/live-mirror churn. char[] hashed as
+  // NUL-terminated string (ctors zero only byte 0, so ImHashData over the fixed buffer would be unstable).
+  IMGUI_API ImGuiID             AppGraphSignature(const ImGuiAppGraph* g);
 
   // Typed links. CanLink validates an attempted edge (kind pairing, no self/dup, no duplicate dep type, no
   // cycle) and writes a reason to err on rejection. CaptureAppGraphLinks folds imnodes create/destroy events,
@@ -444,8 +462,14 @@ namespace ImGui
   IMGUI_API void                EditAppDataEdgeBindings(ImGuiAppGraph* g, int link_id);
 
   // Render the whole typed graph inside the current window (wraps BeginNodeEditor..EndNodeEditor). app may be
-  // null (design-only); when non-null, builtin control bodies can reflect live data.
-  IMGUI_API void                ShowAppGraphEditor(ImGuiApp* app, ImGuiAppGraph* g);
+  // null (design-only); when non-null, builtin control bodies can reflect live data. *selected_node_id is the
+  // window-level selection (caller-owned, -1 = none): the editor reconciles it both ways (canvas<->tree) and
+  // clears dangling ids. show_live hides (never deletes) read-only live-mirror nodes when false.
+  IMGUI_API void                ShowAppGraphEditor(ImGuiApp* app, ImGuiAppGraph* g, int* selected_node_id, bool show_live);
+
+  // Origin breadcrumb for a selected node: "sel: MainWindow > Mixer [design]" / "[live]" / "[promoted]" /
+  // "sel: -" when id < 0 or unknown. char[] out, no references; encapsulates the containment-parent walk.
+  IMGUI_API void                AppGraphSelectionBreadcrumb(const ImGuiAppGraph* g, int node_id, char* buf, int buf_size);
 
   // Mirror the running app's controls into *g WITHOUT reflection: remove all prior live nodes, then add one
   // read-only live Control node per pushed control (keyed by GetControlDataID) plus the data edges between

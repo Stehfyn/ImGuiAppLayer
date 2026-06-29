@@ -555,7 +555,8 @@ namespace ImGui
   }
 
   // Stamp the mandatory ports for a node kind. For a Control, DataOut/DataIn carry the node's own data type id
-  // (DataIn is a wildcard multi-link intake -> 0). Containment ports wire the ownership tree.
+  // (DataIn is a wildcard multi-link intake -> 0). Layers are fixed root composition slots, so they deliberately
+  // have no containment ports.
   static void AppGraphStampPorts(ImGuiAppGraph* g, ImGuiAppNode* n)
   {
     const ImGuiID self_data = n->IsBuiltin && n->DataTypeName[0] ? AppConstantHash(n->DataTypeName)
@@ -566,7 +567,6 @@ namespace ImGui
       AppGraphPushPort(g, n, ImGuiAppPortKind_ChildIn, "children", 0);
       break;
     case ImGuiAppNodeKind_Layer:
-      AppGraphPushPort(g, n, ImGuiAppPortKind_ChildOut, "parent", 0);
       break;
     case ImGuiAppNodeKind_Window:
     case ImGuiAppNodeKind_Sidebar:
@@ -582,6 +582,254 @@ namespace ImGui
     }
   }
 
+  static int AppGraphPlacementColumn(const ImGuiAppNode* n)
+  {
+    switch (n->Kind)
+    {
+    case ImGuiAppNodeKind_App:
+    case ImGuiAppNodeKind_Layer:   return 0;
+    case ImGuiAppNodeKind_Window:
+    case ImGuiAppNodeKind_Sidebar: return 1;
+    case ImGuiAppNodeKind_Control: return 2;
+    default:                       return 2;
+    }
+  }
+
+  static const float kAppGraphX0 = 40.0f;
+  static const float kAppGraphY0 = 40.0f;
+  static const float kAppGraphLayerNodeWidth = 520.0f;
+  static const float kAppGraphLayerRowH = 145.0f;
+
+  static int AppGraphPlacementRowHint(const ImGuiAppNode* n)
+  {
+    if (n->Kind == ImGuiAppNodeKind_App)
+      return 0;
+    if (n->Kind == ImGuiAppNodeKind_Layer)
+      return 1 + (int)n->LayerType;
+    return 0;
+  }
+
+  static bool AppGraphPlacementOccupied(const ImGuiAppGraph* g, const ImGuiAppNode* self, const ImVec2& pos)
+  {
+    const float min_dx = 230.0f;
+    const float min_dy = 125.0f;
+    for (int i = 0; i < g->Nodes.Size; i++)
+    {
+      const ImGuiAppNode* other = &g->Nodes.Data[i];
+      if (other == self || !other->HasGridPos)
+        continue;
+      if (ImAbs(other->GridPos.x - pos.x) < min_dx && ImAbs(other->GridPos.y - pos.y) < min_dy)
+        return true;
+    }
+    return false;
+  }
+
+  static ImVec2 AppGraphFindOpenPlacement(const ImGuiAppGraph* g, const ImGuiAppNode* n, const ImVec2& preferred, bool has_preferred)
+  {
+    const float col_w = 600.0f;
+    const float row_h = kAppGraphLayerRowH;
+
+    ImVec2 start = preferred;
+    if (!has_preferred)
+    {
+      start.x = kAppGraphX0 + AppGraphPlacementColumn(n) * col_w;
+      start.y = kAppGraphY0 + AppGraphPlacementRowHint(n) * row_h;
+    }
+
+    // Search down first: columns remain meaningful, and extra nodes under the same role stay grouped.
+    for (int pass = 0; pass < 2; pass++)
+    {
+      for (int row = 0; row < 64; row++)
+      {
+        const ImVec2 pos = ImVec2(start.x + pass * col_w * 0.5f, start.y + row * row_h);
+        if (!AppGraphPlacementOccupied(g, n, pos))
+          return pos;
+      }
+    }
+    return start;
+  }
+
+  static void AppGraphCollectVisibleLayerStack(const ImGuiAppGraph* g, bool show_live, ImVector<int>* out_node_ids)
+  {
+    out_node_ids->clear();
+    for (int t = 0; t < ImGuiAppLayerType_COUNT; t++)
+    {
+      for (int i = 0; i < g->Nodes.Size; i++)
+      {
+        const ImGuiAppNode* n = &g->Nodes.Data[i];
+        if (n->Kind != ImGuiAppNodeKind_Layer || n->LayerType != t)
+          continue;
+        if (!show_live && n->IsLive)
+          continue;
+        out_node_ids->push_back(n->Id);
+      }
+    }
+  }
+
+  static ImGuiAppNode* AppGraphFindNodeById(ImGuiAppGraph* g, int node_id)
+  {
+    for (int i = 0; i < g->Nodes.Size; i++)
+      if (g->Nodes.Data[i].Id == node_id)
+        return &g->Nodes.Data[i];
+    return nullptr;
+  }
+
+  static float AppGraphLayerNodeHeight(int node_id)
+  {
+    const float h = ImNodes::GetNodeDimensions(node_id).y;
+    return h > 1.0f ? h : kAppGraphLayerRowH;
+  }
+
+  static int AppGraphLayerStackIndex(ImGuiAppGraph* g, bool show_live, int node_id, int* out_count)
+  {
+    ImVector<int> ids;
+    AppGraphCollectVisibleLayerStack(g, show_live, &ids);
+    if (out_count != nullptr)
+      *out_count = ids.Size;
+
+    for (int i = 1; i < ids.Size; i++)
+    {
+      const int id = ids.Data[i];
+      ImGuiAppNode* n = AppGraphFindNodeById(g, id);
+      const float y = n ? n->GridPos.y : 0.0f;
+      int j = i - 1;
+      while (j >= 0)
+      {
+        ImGuiAppNode* prev = AppGraphFindNodeById(g, ids.Data[j]);
+        if (prev == nullptr || prev->GridPos.y <= y)
+          break;
+        ids.Data[j + 1] = ids.Data[j];
+        j--;
+      }
+      ids.Data[j + 1] = id;
+    }
+
+    for (int i = 0; i < ids.Size; i++)
+      if (ids.Data[i] == node_id)
+        return i;
+    return -1;
+  }
+
+  static void AppGraphConstrainLayerColumn(ImGuiAppGraph* g, bool show_live, int anchor_node_id, const ImVec2* anchor_pos)
+  {
+    ImVector<int> ids;
+    AppGraphCollectVisibleLayerStack(g, show_live, &ids);
+    if (ids.Size == 0)
+      return;
+
+    const float x = kAppGraphX0;
+
+    for (int i = 0; i < ids.Size; i++)
+    {
+      ImGuiAppNode* n = AppGraphFindNodeById(g, ids.Data[i]);
+      if (n == nullptr || n->HasGridPos)
+        continue;
+      n->GridPos = ImVec2(x, kAppGraphY0 + (1 + i) * kAppGraphLayerRowH);
+      n->HasGridPos = true;
+    }
+
+    for (int i = 1; i < ids.Size; i++)
+    {
+      const int id = ids.Data[i];
+      ImGuiAppNode* n = AppGraphFindNodeById(g, id);
+      const float y = n ? n->GridPos.y : 0.0f;
+      int j = i - 1;
+      while (j >= 0)
+      {
+        ImGuiAppNode* prev = AppGraphFindNodeById(g, ids.Data[j]);
+        if (prev == nullptr || prev->GridPos.y <= y)
+          break;
+        ids.Data[j + 1] = ids.Data[j];
+        j--;
+      }
+      ids.Data[j + 1] = id;
+    }
+
+    int anchor_index = 0;
+    if (anchor_node_id != 0)
+      for (int i = 0; i < ids.Size; i++)
+        if (ids.Data[i] == anchor_node_id)
+        {
+          anchor_index = i;
+          break;
+        }
+
+    const float gap = 12.0f;
+    const bool anchor_is_interior = anchor_node_id != 0 && anchor_pos != nullptr && anchor_index > 0 && anchor_index + 1 < ids.Size;
+    if (anchor_node_id != 0 && anchor_pos != nullptr)
+    {
+      ImGuiAppNode* anchor = AppGraphFindNodeById(g, anchor_node_id);
+      if (anchor != nullptr && anchor_is_interior)
+      {
+        const ImGuiAppNode* prev = AppGraphFindNodeById(g, ids.Data[anchor_index - 1]);
+        const ImGuiAppNode* next = AppGraphFindNodeById(g, ids.Data[anchor_index + 1]);
+        float y = anchor_pos->y;
+        if (prev != nullptr && next != nullptr)
+        {
+          const float min_y = prev->GridPos.y + AppGraphLayerNodeHeight(prev->Id) + gap;
+          const float max_y = next->GridPos.y - AppGraphLayerNodeHeight(anchor->Id) - gap;
+          if (min_y <= max_y)
+          {
+            if (y < min_y) y = min_y;
+            if (y > max_y) y = max_y;
+          }
+          else
+          {
+            y = anchor->GridPos.y;
+          }
+        }
+        anchor->GridPos = ImVec2(x, y);
+      }
+      else if (anchor != nullptr)
+      {
+        anchor->GridPos = ImVec2(x, anchor_pos->y);
+      }
+    }
+
+    if (!anchor_is_interior)
+    {
+      for (int i = anchor_index - 1; i >= 0; i--)
+      {
+        ImGuiAppNode* n = AppGraphFindNodeById(g, ids.Data[i]);
+        ImGuiAppNode* next = AppGraphFindNodeById(g, ids.Data[i + 1]);
+        if (n == nullptr || next == nullptr)
+          continue;
+        const float max_y = next->GridPos.y - AppGraphLayerNodeHeight(n->Id) - gap;
+        if (n->GridPos.y > max_y)
+          n->GridPos.y = max_y;
+      }
+      for (int i = anchor_index + 1; i < ids.Size; i++)
+      {
+        ImGuiAppNode* n = AppGraphFindNodeById(g, ids.Data[i]);
+        ImGuiAppNode* prev = AppGraphFindNodeById(g, ids.Data[i - 1]);
+        if (n == nullptr || prev == nullptr)
+          continue;
+        const float min_y = prev->GridPos.y + AppGraphLayerNodeHeight(prev->Id) + gap;
+        if (n->GridPos.y < min_y)
+          n->GridPos.y = min_y;
+      }
+    }
+
+    for (int i = 0; i < ids.Size; i++)
+    {
+      ImGuiAppNode* n = AppGraphFindNodeById(g, ids.Data[i]);
+      if (n == nullptr)
+        continue;
+      const ImVec2 pos(x, n->GridPos.y);
+      n->GridPos = pos;
+      n->HasGridPos = true;
+      n->_NeedsPlace = true;
+      ImNodes::SetNodeGridSpacePos(n->Id, pos);
+    }
+  }
+
+  static void AppGraphPlaceNode(ImGuiAppGraph* g, ImGuiAppNode* n, const ImVec2* preferred)
+  {
+    n->GridPos = AppGraphFindOpenPlacement(g, n, preferred ? *preferred : ImVec2(0.0f, 0.0f), preferred != nullptr);
+    n->HasGridPos = true;
+    n->_NeedsPlace = true;
+  }
+
   static ImGuiAppNode* AppGraphInitNode(ImGuiAppGraph* g, ImGuiAppNodeKind kind, const char* name)
   {
     // Push an EMPTY node first (its ImVector<Port> is null), then populate in place: ImVector relocates by
@@ -591,11 +839,15 @@ namespace ImGui
     n->Id = AppGraphAllocId(g);
     n->Kind = kind;
     ImStrncpy(n->Draft.Name, (name && name[0]) ? name : "Node", IM_ARRAYSIZE(n->Draft.Name));
+    if (kind == ImGuiAppNodeKind_Layer && name != nullptr)
+    {
+      if (strstr(name, "Command") != nullptr) n->LayerType = ImGuiAppLayerType_Command;
+      else if (strstr(name, "Status") != nullptr) n->LayerType = ImGuiAppLayerType_Status;
+      else if (strstr(name, "Window") != nullptr) n->LayerType = ImGuiAppLayerType_Window;
+      else n->LayerType = ImGuiAppLayerType_Task;
+    }
     n->BodyAttrId = AppGraphAllocId(g);
-    const int idx = g->Nodes.Size - 1;
-    n->GridPos = ImVec2(40.0f + (idx % 4) * 210.0f, 40.0f + (idx / 4) * 120.0f);   // grid, not a diagonal pile
-    n->HasGridPos = true;
-    n->_NeedsPlace = true;
+    AppGraphPlaceNode(g, n, nullptr);
     AppGraphStampPorts(g, n);
     return n;
   }
@@ -622,10 +874,7 @@ namespace ImGui
     if (data_type_name && data_type_name[0])
       ImStrncpy(n->DataTypeName, data_type_name, IM_ARRAYSIZE(n->DataTypeName));
     n->BodyAttrId = AppGraphAllocId(g);
-    const int idx = g->Nodes.Size - 1;
-    n->GridPos = ImVec2(40.0f + (idx % 4) * 210.0f, 40.0f + (idx / 4) * 120.0f);   // grid, not a diagonal pile
-    n->HasGridPos = true;
-    n->_NeedsPlace = true;
+    AppGraphPlaceNode(g, n, nullptr);
     AppGraphStampPorts(g, n);
     return n;
   }
@@ -654,6 +903,213 @@ namespace ImGui
     }
     if (out_owner) *out_owner = nullptr;
     return nullptr;
+  }
+
+  static const ImGuiAppNode* AppGraphFindLayerOfType(const ImGuiAppGraph* g, ImGuiAppLayerType type, int ignore_node_id = 0)
+  {
+    IM_ASSERT(g != nullptr);
+    for (int i = 0; i < g->Nodes.Size; i++)
+    {
+      const ImGuiAppNode* n = &g->Nodes.Data[i];
+      if (n->Id != ignore_node_id && n->Kind == ImGuiAppNodeKind_Layer && n->LayerType == type)
+        return n;
+    }
+    return nullptr;
+  }
+
+  bool AppGraphHasLayerType(const ImGuiAppGraph* g, ImGuiAppLayerType type)
+  {
+    return AppGraphFindLayerOfType(g, type) != nullptr;
+  }
+
+  static bool AppNodeIsCommandLayer(const ImGuiAppNode* n)
+  {
+    return n != nullptr && n->Kind == ImGuiAppNodeKind_Layer && n->LayerType == ImGuiAppLayerType_Command;
+  }
+
+  static int AppGraphCommandDefinitionCount(const ImGuiAppGraph* g)
+  {
+    int count = 0;
+    for (int i = 0; i < g->Nodes.Size; i++)
+      if (AppNodeIsCommandLayer(&g->Nodes.Data[i]))
+        count += g->Nodes.Data[i].Commands.Size;
+    return count;
+  }
+
+  static const ImGuiAppCommandDesc* AppGraphCommandDefinitionAt(const ImGuiAppGraph* g, int index)
+  {
+    int seen = 0;
+    for (int i = 0; i < g->Nodes.Size; i++)
+    {
+      const ImGuiAppNode* n = &g->Nodes.Data[i];
+      if (!AppNodeIsCommandLayer(n))
+        continue;
+      for (int c = 0; c < n->Commands.Size; c++, seen++)
+        if (seen == index)
+          return &n->Commands.Data[c];
+    }
+    return nullptr;
+  }
+
+  static const ImGuiAppCommandDesc* AppGraphFindCommandDefinition(const ImGuiAppGraph* g, const char* name)
+  {
+    if (name == nullptr || name[0] == 0)
+      return nullptr;
+    for (int i = 0; i < g->Nodes.Size; i++)
+    {
+      const ImGuiAppNode* n = &g->Nodes.Data[i];
+      if (!AppNodeIsCommandLayer(n))
+        continue;
+      for (int c = 0; c < n->Commands.Size; c++)
+        if (strcmp(n->Commands.Data[c].Name, name) == 0)
+          return &n->Commands.Data[c];
+    }
+    return nullptr;
+  }
+
+  static bool AppNodeCommandNameUsed(const ImGuiAppNode* n, const char* name, int ignore_index = -1)
+  {
+    if (n == nullptr || name == nullptr || name[0] == 0)
+      return false;
+    for (int i = 0; i < n->Commands.Size; i++)
+      if (i != ignore_index && strcmp(n->Commands.Data[i].Name, name) == 0)
+        return true;
+    return false;
+  }
+
+  void AppNodeAddCommand(ImGuiAppNode* n, const char* name)
+  {
+    IM_ASSERT(n != nullptr);
+    ImGuiAppCommandDesc cmd;
+    ImStrncpy(cmd.Name, (name && name[0]) ? name : "NewCommand", IM_ARRAYSIZE(cmd.Name));
+    n->Commands.push_back(cmd);
+  }
+
+  static void AppNodeAddCommandUnique(ImGuiAppNode* n, const char* base_name)
+  {
+    char name[IM_LABEL_SIZE];
+    ImStrncpy(name, (base_name && base_name[0]) ? base_name : "NewCommand", IM_ARRAYSIZE(name));
+    if (AppNodeCommandNameUsed(n, name))
+      for (int suffix = 2; suffix < 1000; suffix++)
+      {
+        ImFormatString(name, IM_ARRAYSIZE(name), "%s%d", (base_name && base_name[0]) ? base_name : "NewCommand", suffix);
+        if (!AppNodeCommandNameUsed(n, name))
+          break;
+      }
+    AppNodeAddCommand(n, name);
+  }
+
+  void AppNodeRemoveCommand(ImGuiAppNode* n, int index)
+  {
+    IM_ASSERT(n != nullptr);
+    if (index >= 0 && index < n->Commands.Size)
+      n->Commands.erase(n->Commands.Data + index);
+  }
+
+  static void EditAppNodeCommands(ImGuiAppNode* n)
+  {
+    IM_ASSERT(n != nullptr);
+
+    ImGui::TextDisabled("app commands");
+    int remove = -1;
+    for (int i = 0; i < n->Commands.Size; i++)
+    {
+      ImGui::PushID(i);
+      ImGui::SetNextItemWidth(ImGui::GetFontSize() * 16.0f);
+      ImGui::InputText("##cmd", n->Commands.Data[i].Name, IM_ARRAYSIZE(n->Commands.Data[i].Name));
+      ImGui::SameLine();
+      if (AppNodeCommandNameUsed(n, n->Commands.Data[i].Name, i))
+      {
+        ImGui::TextDisabled("duplicate");
+      }
+      else
+      {
+        char enum_name[IM_LABEL_SIZE];
+        AppSanitizeIdentifier(enum_name, IM_ARRAYSIZE(enum_name), n->Commands.Data[i].Name);
+        ImGui::TextDisabled("AppCommand_%s", enum_name);
+      }
+      ImGui::SameLine();
+      if (ImGui::SmallButton("X"))
+        remove = i;
+      ImGui::PopID();
+    }
+    if (remove >= 0)
+      AppNodeRemoveCommand(n, remove);
+    if (ImGui::Button("+ Command"))
+      AppNodeAddCommandUnique(n, "NewCommand");
+  }
+
+  static void EditAppControlCommandChoices(const ImGuiAppGraph* g, ImGuiAppNode* n)
+  {
+    IM_ASSERT(g != nullptr && n != nullptr);
+
+    const int def_count = AppGraphCommandDefinitionCount(g);
+    if (def_count == 0)
+    {
+      ImGui::TextDisabled("commands: define commands on CommandLayer");
+      return;
+    }
+
+    ImGui::TextDisabled("emits commands");
+    int remove = -1;
+    for (int i = 0; i < n->Commands.Size; i++)
+    {
+      ImGui::PushID(i);
+      const char* current = n->Commands.Data[i].Name;
+      const bool missing = current[0] != 0 && AppGraphFindCommandDefinition(g, current) == nullptr;
+      char preview[IM_LABEL_SIZE + 32];
+      if (missing)
+        ImFormatString(preview, IM_ARRAYSIZE(preview), "%s (missing)", current);
+      else if (current[0] != 0)
+        ImFormatString(preview, IM_ARRAYSIZE(preview), "%s", current);
+      else
+        ImFormatString(preview, IM_ARRAYSIZE(preview), "<command>");
+
+      ImGui::SetNextItemWidth(ImGui::GetFontSize() * 16.0f);
+      if (ImGui::BeginCombo("##cmdref", preview))
+      {
+        for (int d = 0; d < def_count; d++)
+        {
+          const ImGuiAppCommandDesc* def = AppGraphCommandDefinitionAt(g, d);
+          if (def == nullptr)
+            continue;
+          const bool selected = strcmp(current, def->Name) == 0;
+          const bool taken = AppNodeCommandNameUsed(n, def->Name, i);
+          if (taken) ImGui::BeginDisabled();
+          if (ImGui::Selectable(def->Name, selected) && !taken)
+            ImStrncpy(n->Commands.Data[i].Name, def->Name, IM_ARRAYSIZE(n->Commands.Data[i].Name));
+          if (taken) ImGui::EndDisabled();
+        }
+        ImGui::EndCombo();
+      }
+      ImGui::SameLine();
+      if (ImGui::SmallButton("X"))
+        remove = i;
+      ImGui::PopID();
+    }
+    if (remove >= 0)
+      AppNodeRemoveCommand(n, remove);
+
+    const ImGuiAppCommandDesc* first_available = nullptr;
+    for (int d = 0; d < def_count; d++)
+    {
+      const ImGuiAppCommandDesc* def = AppGraphCommandDefinitionAt(g, d);
+      if (def != nullptr && !AppNodeCommandNameUsed(n, def->Name))
+      {
+        first_available = def;
+        break;
+      }
+    }
+    if (first_available == nullptr)
+      ImGui::BeginDisabled();
+    if (ImGui::Button("+ Command") && first_available != nullptr)
+      AppNodeAddCommand(n, first_available->Name);
+    if (first_available == nullptr)
+    {
+      ImGui::EndDisabled();
+      ImGui::SameLine();
+      ImGui::TextDisabled("all commands selected");
+    }
   }
 
   // Owner node id for a port id (const-friendly; -1 if unknown). Used by topo/codegen which take const graphs.
@@ -831,7 +1287,26 @@ namespace ImGui
         link.EndAttr = d;
         link.Kind = k;
         g->Links.push_back(link);
+        if (k == ImGuiAppEdgeKind_Containment)
+        {
+          ImGuiAppNode* child = AppGraphFindNode(g, AppGraphPortOwnerId(g, s));
+          ImGuiAppNode* parent = AppGraphFindNode(g, AppGraphPortOwnerId(g, d));
+          if (child != nullptr && parent != nullptr)
+          {
+            const ImVec2 preferred = parent->GridPos + ImVec2(280.0f, 0.0f);
+            AppGraphPlaceNode(g, child, &preferred);
+          }
+        }
         changed = true;
+        g->LastLinkErr[0] = 0;                                  // a successful create silences any standing toast
+      }
+      else
+      {
+        // The reason is otherwise discarded. Drive the demo's fade off the rejection branch, NOT the function's
+        // `changed` return (also true on link destroy below), and bump the seq so identical back-to-back
+        // rejections still re-fire the toast.
+        ImStrncpy(g->LastLinkErr, err, IM_ARRAYSIZE(g->LastLinkErr));
+        g->LastLinkErrSeq++;
       }
     }
 
@@ -914,6 +1389,18 @@ namespace ImGui
     }
   }
 
+  static const char* AppLayerNodeName(ImGuiAppLayerType t)
+  {
+    switch (t)
+    {
+    case ImGuiAppLayerType_Task:    return "TaskLayer";
+    case ImGuiAppLayerType_Command: return "CommandLayer";
+    case ImGuiAppLayerType_Status:  return "StatusLayer";
+    case ImGuiAppLayerType_Window:  return "WindowLayer";
+    default:                        return "Layer";
+    }
+  }
+
   static const char* AppNodeKindName(ImGuiAppNodeKind k)
   {
     switch (k)
@@ -936,16 +1423,158 @@ namespace ImGui
     return -1;
   }
 
-  void ShowAppGraphEditor(ImGuiApp* app, ImGuiAppGraph* g)
+  static void AppNodeDataTypeName(const ImGuiAppNode* n, char* out, size_t out_size);   // fwd (defined below)
+  static const ImGuiAppNode* AppGraphFindNodeConst(const ImGuiAppGraph* g, int node_id);   // fwd
+  static int AppGraphParentOf(const ImGuiAppGraph* g, int child_node_id);                   // fwd
+
+  // One origin vocabulary shared by the canvas title-bar tint, the tree text tint, and the demo legend, so the
+  // three surfaces cannot drift. design = default (no push).
+  static const ImU32 kAppLiveTint     = IM_COL32(90, 120, 165, 255);   // steel-blue: read-only live mirror
+  static const ImU32 kAppPromotedTint = IM_COL32(80, 150, 90, 255);    // green: design matches a live type
+
+  ImU32 AppGraphOriginColor(const ImGuiAppNode* n)   // exposed so the demo legend reads the same constants
+  {
+    if (n->IsLive)     return kAppLiveTint;
+    if (n->IsPromoted) return kAppPromotedTint;
+    return 0;
+  }
+
+  // Push the origin title-bar tint for a node; returns the push count so the caller can pop in balance. Does NOT
+  // touch TitleBarSelected -- the selection cue must stay legible (Theme C depends on it).
+  static int AppNodePushOriginStyle(const ImGuiAppNode* n)
+  {
+    const ImU32 c = AppGraphOriginColor(n);
+    if (c == 0) return 0;
+    ImNodes::PushColorStyle(ImNodesCol_TitleBar, c);
+    ImNodes::PushColorStyle(ImNodesCol_TitleBarHovered, c);
+    return 2;
+  }
+
+  static void AppDrawLayerGroupBox(const ImGuiAppGraph* g, bool show_live)
+  {
+    bool any = false;
+    ImVec2 bb_min(FLT_MAX, FLT_MAX);
+    ImVec2 bb_max(-FLT_MAX, -FLT_MAX);
+    for (int i = 0; i < g->Nodes.Size; i++)
+    {
+      const ImGuiAppNode* n = &g->Nodes.Data[i];
+      if (n->Kind != ImGuiAppNodeKind_Layer)
+        continue;
+      if (!show_live && n->IsLive)
+        continue;
+      const ImVec2 pos = ImNodes::GetNodeScreenSpacePos(n->Id);
+      const ImVec2 size = ImNodes::GetNodeDimensions(n->Id);
+      bb_min.x = ImMin(bb_min.x, pos.x);
+      bb_min.y = ImMin(bb_min.y, pos.y);
+      bb_max.x = ImMax(bb_max.x, pos.x + size.x);
+      bb_max.y = ImMax(bb_max.y, pos.y + size.y);
+      any = true;
+    }
+    if (!any)
+      return;
+
+    const float em = ImGui::GetFontSize();
+    const float pad = em * 0.75f;
+    const float title_h = ImGui::GetFrameHeight();
+    bb_min.x -= pad;
+    bb_min.y -= title_h + pad;
+    bb_max.x += pad;
+    bb_max.y += pad;
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImU32 fill = ImGui::GetColorU32(ImVec4(0.35f, 0.35f, 0.35f, 0.08f));
+    const ImU32 outline = ImGui::GetColorU32(ImVec4(0.70f, 0.70f, 0.70f, 0.55f));
+    const ImU32 title_bg = ImGui::GetColorU32(ImVec4(0.20f, 0.20f, 0.20f, 0.75f));
+    const ImU32 title_fg = ImGui::GetColorU32(ImGuiCol_Text);
+    const float rounding = 4.0f;
+
+    dl->AddRectFilled(bb_min, bb_max, fill, rounding);
+    dl->AddRect(bb_min, bb_max, outline, rounding, 0, 1.5f);
+
+    const char* title = "ImGuiAppLayer";
+    const ImVec2 text_size = ImGui::CalcTextSize(title);
+    const ImVec2 title_min = ImVec2(bb_min.x + pad, bb_min.y);
+    const ImVec2 title_max = ImVec2(title_min.x + text_size.x + pad, bb_min.y + title_h);
+    dl->AddRectFilled(title_min, title_max, title_bg, 3.0f);
+    dl->AddText(ImVec2(title_min.x + pad * 0.5f, title_min.y + (title_h - text_size.y) * 0.5f), title_fg, title);
+  }
+
+  static bool AppHandleLayerVerticalDrag(ImGuiAppGraph* g, bool show_live, int* out_anchor_id, ImVec2* out_anchor_pos)
+  {
+    static int dragging_id = 0;
+    static float drag_start_mouse_y = 0.0f;
+    static float drag_start_node_y = 0.0f;
+
+    if (out_anchor_id != nullptr) *out_anchor_id = 0;
+    if (out_anchor_pos != nullptr) *out_anchor_pos = ImVec2(0.0f, 0.0f);
+
+    if (!ImGui::IsMouseDown(ImGuiMouseButton_Left))
+      dragging_id = 0;
+
+    int hovered = 0;
+    if (dragging_id == 0 && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && ImNodes::IsNodeHovered(&hovered))
+    {
+      ImGuiAppNode* n = AppGraphFindNodeById(g, hovered);
+      if (n != nullptr && n->Kind == ImGuiAppNodeKind_Layer && (show_live || !n->IsLive))
+      {
+        dragging_id = n->Id;
+        drag_start_mouse_y = ImGui::GetIO().MousePos.y;
+        drag_start_node_y = ImNodes::GetNodeGridSpacePos(n->Id).y;
+      }
+    }
+
+    if (dragging_id != 0 && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0.0f))
+    {
+      ImGuiAppNode* n = AppGraphFindNodeById(g, dragging_id);
+      if (n != nullptr)
+      {
+        float y = drag_start_node_y + (ImGui::GetIO().MousePos.y - drag_start_mouse_y);
+        int layer_count = 0;
+        const int layer_index = AppGraphLayerStackIndex(g, show_live, n->Id, &layer_count);
+        if (layer_count > 1 && layer_index == 0 && y > drag_start_node_y)
+          y = drag_start_node_y;
+        if (layer_count > 1 && layer_index == layer_count - 1 && y < drag_start_node_y)
+          y = drag_start_node_y;
+        const ImVec2 pos(kAppGraphX0, y);
+        AppGraphConstrainLayerColumn(g, show_live, n->Id, &pos);
+
+        const ImVec2 accepted_pos = n->GridPos;
+        if (out_anchor_id != nullptr) *out_anchor_id = n->Id;
+        if (out_anchor_pos != nullptr) *out_anchor_pos = accepted_pos;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  void ShowAppGraphEditor(ImGuiApp* app, ImGuiAppGraph* g, int* selected_node_id, bool show_live)
   {
     IM_ASSERT(g != nullptr);
     IM_UNUSED(app);
+
+    // While hidden, live nodes are not submitted, so imnodes evicts them from its pool. On the hidden->shown
+    // transition, re-arm _NeedsPlace so each one is re-placed at its saved GridPos (otherwise imnodes recreates
+    // it at the default origin). Single editor instance in the demo, so a function-local latch is enough.
+    static bool prev_show_live = true;
+    if (show_live && !prev_show_live)
+      for (int i = 0; i < g->Nodes.Size; i++)
+        if (g->Nodes.Data[i].IsLive)
+          g->Nodes.Data[i]._NeedsPlace = true;
+    prev_show_live = show_live;
 
     ImNodes::BeginNodeEditor();
 
     for (int i = 0; i < g->Nodes.Size; i++)
     {
       ImGuiAppNode* n = &g->Nodes.Data[i];
+
+      // Hidden live mirror: skip the ENTIRE per-node submission (incl. placement). Merely skipping the body
+      // would leave the grid-pos read-back below dereferencing a node imnodes evicted -> hard assert.
+      if (!show_live && n->IsLive)
+        continue;
+
+      if (n->Kind == ImGuiAppNodeKind_Layer)
+        ImNodes::SetNodeDraggable(n->Id, false);
 
       // Position must be set BEFORE BeginNode (imnodes lays out content at the node origin).
       if (n->_NeedsPlace)
@@ -954,9 +1583,13 @@ namespace ImGui
         n->_NeedsPlace = false;
       }
 
+      const int origin_styles = AppNodePushOriginStyle(n);   // balanced pop after EndAppNode
+
       // Live nodes mirror the running app and are read-only: static (non-renamable) title.
       if (n->IsLive)
         ImGui::BeginAppNode(n->Id, n->Draft.Name[0] ? n->Draft.Name : "(live)");
+      else if (n->Kind == ImGuiAppNodeKind_Layer)
+        ImGui::BeginAppNode(n->Id, AppLayerNodeName(n->LayerType));
       else
         ImGui::BeginAppNodeRenamable(n->Id, n->Draft.Name, IM_ARRAYSIZE(n->Draft.Name), &g->EditingNodeId);
 
@@ -971,16 +1604,30 @@ namespace ImGui
       // Body (a dedicated static attribute id; always submits >=1 item so imnodes' empty-body assert can't fire).
       ImNodes::BeginStaticAttribute(n->BodyAttrId);
       ImGui::PushID(n->Id);
+      if (n->IsLive)
+        ImGui::TextDisabled("live - read-only (mirrors running app)");
+      else if (n->IsPromoted)
+      {
+        char dt[IM_LABEL_SIZE];
+        AppNodeDataTypeName(n, dt, IM_ARRAYSIZE(dt));
+        ImGui::TextDisabled("promoted -> matches live %s", dt);
+      }
       if (n->Kind == ImGuiAppNodeKind_Control)
       {
         if (n->IsBuiltin)
         {
-          ImGui::TextDisabled("%s", n->TypeName[0] ? n->TypeName : "(builtin)");
-          if (n->DataTypeName[0]) ImGui::TextDisabled("data: %s", n->DataTypeName);
+          // The title already names the type; only show the data type when it adds something (differs from the
+          // title), with a minimal fallback so the body is never empty (imnodes' empty-body assert).
+          if (n->DataTypeName[0] && strcmp(n->DataTypeName, n->Draft.Name) != 0)
+            ImGui::TextDisabled("data: %s", n->DataTypeName);
+          else if (!n->IsLive && !n->IsPromoted)
+            ImGui::TextDisabled("builtin");
         }
         else
         {
           ImGui::EditAppNodeDraftFields(&n->Draft);
+          if (!n->IsLive)
+            EditAppControlCommandChoices(g, n);
         }
 
         const int in_link = AppGraphIncomingDataLink(g, n->Id);
@@ -989,31 +1636,45 @@ namespace ImGui
       }
       else if (n->Kind == ImGuiAppNodeKind_Layer)
       {
-        if (n->IsLive)
-        {
-          // Framework-managed: show the layer type, not editable.
-          ImGui::TextDisabled("%s", AppLayerTypeName(n->LayerType));
-        }
-        else
+        // A live layer's title is already its type (e.g. "ImGuiAppTaskLayer") and the origin badge is the body
+        // item, so it needs no body line. A design layer shows the type *selector* (interactive, not a dup).
+        if (!n->IsLive)
         {
           ImGui::SetNextItemWidth(ImGui::GetFontSize() * 11.0f);
           if (ImGui::BeginCombo("##layertype", AppLayerTypeName(n->LayerType)))
           {
             for (int t = 0; t < ImGuiAppLayerType_COUNT; t++)
-              if (ImGui::Selectable(AppLayerTypeName((ImGuiAppLayerType)t), n->LayerType == t))
+            {
+              const bool is_current = n->LayerType == t;
+              const bool taken = !is_current && AppGraphFindLayerOfType(g, (ImGuiAppLayerType)t, n->Id) != nullptr;
+              if (taken) ImGui::BeginDisabled();
+              if (ImGui::Selectable(AppLayerTypeName((ImGuiAppLayerType)t), is_current) && !taken)
+              {
                 n->LayerType = (ImGuiAppLayerType)t;
+                AppGraphPlaceNode(g, n, nullptr);
+              }
+              if (taken) ImGui::EndDisabled();
+            }
             ImGui::EndCombo();
           }
         }
+        if (n->LayerType == ImGuiAppLayerType_Command)
+          EditAppNodeCommands(n);
+        ImGui::Dummy(ImVec2(kAppGraphLayerNodeWidth, 1.0f));
       }
       else if (n->Kind == ImGuiAppNodeKind_Window || n->Kind == ImGuiAppNodeKind_Sidebar)
       {
-        ImGui::TextDisabled("%s", AppNodeKindName(n->Kind));
-        if (n->IsBuiltin && n->TypeName[0]) ImGui::TextDisabled("type: %s", n->TypeName);
+        // Design nodes show their kind so Window vs Sidebar is legible on the canvas; live nodes carry that in
+        // the origin badge already. Builtin type only when it differs from the title.
+        if (!n->IsLive)
+          ImGui::TextDisabled("%s", AppNodeKindName(n->Kind));
+        if (n->IsBuiltin && n->TypeName[0] && strcmp(n->TypeName, n->Draft.Name) != 0)
+          ImGui::TextDisabled("type: %s", n->TypeName);
       }
       else
       {
-        ImGui::TextDisabled("%s", AppNodeKindName(n->Kind));
+        if (!n->IsLive)
+          ImGui::TextDisabled("%s", AppNodeKindName(n->Kind));
       }
       ImGui::PopID();
       ImNodes::EndStaticAttribute();
@@ -1027,22 +1688,66 @@ namespace ImGui
       }
 
       ImGui::EndAppNode();
+      for (int s = 0; s < origin_styles; s++) ImNodes::PopColorStyle();   // balanced with AppNodePushOriginStyle
     }
 
-    ImGui::DrawAppNodeLinks(&g->Links);
-    ImNodes::EndNodeEditor();
+    // Draw links. When live nodes are hidden, skip any link incident on a hidden (live) owner: that attribute
+    // was never submitted this frame, so imnodes must not reference it. (Inlined: DrawAppNodeLinks can't resolve
+    // owners.)
+    for (int li = 0; li < g->Links.Size; li++)
+    {
+      if (!show_live)
+      {
+        ImGuiAppNode* oa = nullptr; ImGuiAppNode* ob = nullptr;
+        AppGraphFindPort(g, g->Links.Data[li].StartAttr, &oa);
+        AppGraphFindPort(g, g->Links.Data[li].EndAttr, &ob);
+        if ((oa && oa->IsLive) || (ob && ob->IsLive)) continue;
+      }
+      ImNodes::Link(g->Links.Data[li].Id, g->Links.Data[li].StartAttr, g->Links.Data[li].EndAttr);
+    }
 
-    // Persist canvas layout for save/load.
+    // Overview minimap (drawn as an overlay inside the editor; must precede EndNodeEditor). Lets the user see
+    // and jump to nodes that sit past the visible canvas edge.
+    ImNodes::MiniMap(0.2f, ImNodesMiniMapLocation_BottomRight);
+    ImNodes::EndNodeEditor();
+    int dragged_layer_id = 0;
+    ImVec2 dragged_layer_pos(0.0f, 0.0f);
+    AppHandleLayerVerticalDrag(g, show_live, &dragged_layer_id, &dragged_layer_pos);
+
+    // Persist canvas layout for save/load. Skip hidden live nodes: they were not submitted, so a read-back
+    // would assert; skipping also correctly retains each hidden node's last-shown GridPos.
+    int moved_layer_id = 0;
+    ImVec2 moved_layer_pos(0.0f, 0.0f);
     for (int i = 0; i < g->Nodes.Size; i++)
     {
-      g->Nodes.Data[i].GridPos = ImNodes::GetNodeGridSpacePos(g->Nodes.Data[i].Id);
-      g->Nodes.Data[i].HasGridPos = true;
+      if (!show_live && g->Nodes.Data[i].IsLive) continue;
+      ImGuiAppNode* n = &g->Nodes.Data[i];
+      const ImVec2 pos = ImNodes::GetNodeGridSpacePos(n->Id);
+      if (n->Kind == ImGuiAppNodeKind_Layer && n->HasGridPos
+          && (ImAbs(pos.x - n->GridPos.x) > 0.5f || ImAbs(pos.y - n->GridPos.y) > 0.5f))
+      {
+        moved_layer_id = n->Id;
+        moved_layer_pos = pos;
+      }
+      n->GridPos = pos;
+      n->HasGridPos = true;
     }
+    if (dragged_layer_id != 0)
+    {
+      moved_layer_id = dragged_layer_id;
+      moved_layer_pos = dragged_layer_pos;
+    }
+    AppGraphConstrainLayerColumn(g, show_live, moved_layer_id, moved_layer_id != 0 ? &moved_layer_pos : nullptr);
+    AppDrawLayerGroupBox(g, show_live);
 
     // In-widget node palette: right-click the canvas to add any node kind. The graph is the app, so every
     // pillar -- layers, windows, sidebars, controls -- is created here, inside the editor itself.
+    static ImVec2 add_popup_grid = ImVec2(0.0f, 0.0f);
     if (ImNodes::IsEditorHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Right))
+    {
+      add_popup_grid = ImGui::GetIO().MousePos - ImGui::GetItemRectMin() - ImNodes::EditorContextGetPanning();
       ImGui::OpenPopup("##AppGraphAdd");
+    }
     if (ImGui::BeginPopup("##AppGraphAdd"))
     {
       ImGui::TextDisabled("Add node");
@@ -1051,20 +1756,95 @@ namespace ImGui
       if (ImGui::MenuItem("Control"))   added = AppGraphAddNode(g, ImGuiAppNodeKind_Control, "NewControl");
       if (ImGui::BeginMenu("Layer"))
       {
-        if (ImGui::MenuItem("Task"))    { added = AppGraphAddNode(g, ImGuiAppNodeKind_Layer, "TaskLayer");    added->LayerType = ImGuiAppLayerType_Task;    }
-        if (ImGui::MenuItem("Command")) { added = AppGraphAddNode(g, ImGuiAppNodeKind_Layer, "CommandLayer"); added->LayerType = ImGuiAppLayerType_Command; }
-        if (ImGui::MenuItem("Status"))  { added = AppGraphAddNode(g, ImGuiAppNodeKind_Layer, "StatusLayer");  added->LayerType = ImGuiAppLayerType_Status;  }
-        if (ImGui::MenuItem("Window"))  { added = AppGraphAddNode(g, ImGuiAppNodeKind_Layer, "WindowLayer");  added->LayerType = ImGuiAppLayerType_Window;  }
+        if (ImGui::MenuItem("Task", nullptr, false, !AppGraphHasLayerType(g, ImGuiAppLayerType_Task)))       { added = AppGraphAddNode(g, ImGuiAppNodeKind_Layer, "TaskLayer");    added->LayerType = ImGuiAppLayerType_Task;    }
+        if (ImGui::MenuItem("Command", nullptr, false, !AppGraphHasLayerType(g, ImGuiAppLayerType_Command))) { added = AppGraphAddNode(g, ImGuiAppNodeKind_Layer, "CommandLayer"); added->LayerType = ImGuiAppLayerType_Command; }
+        if (ImGui::MenuItem("Status", nullptr, false, !AppGraphHasLayerType(g, ImGuiAppLayerType_Status)))   { added = AppGraphAddNode(g, ImGuiAppNodeKind_Layer, "StatusLayer");  added->LayerType = ImGuiAppLayerType_Status;  }
+        if (ImGui::MenuItem("Window", nullptr, false, !AppGraphHasLayerType(g, ImGuiAppLayerType_Window)))   { added = AppGraphAddNode(g, ImGuiAppNodeKind_Layer, "WindowLayer");  added->LayerType = ImGuiAppLayerType_Window;  }
         ImGui::EndMenu();
       }
       if (ImGui::MenuItem("Window"))    added = AppGraphAddNode(g, ImGuiAppNodeKind_Window,  "Window");
       if (ImGui::MenuItem("Sidebar"))   added = AppGraphAddNode(g, ImGuiAppNodeKind_Sidebar, "Sidebar");
-      IM_UNUSED(added);                 // AppGraphAddNode already stages a staggered grid position
+      if (added != nullptr)
+        AppGraphPlaceNode(g, added, &add_popup_grid);
       ImGui::EndPopup();
     }
 
     char err[128];
     ImGui::CaptureAppGraphLinks(g, err, IM_ARRAYSIZE(err));
+
+    // B1: transient link-rejection toast at the canvas bottom-left. The editor child is the last item after
+    // EndNodeEditor; fade alpha over ~2.5s, the timer re-armed whenever LastLinkErrSeq changes (single owner).
+    {
+      static int   shown_seq = -1;
+      static float toast_t0 = 0.0f;
+      const float kFade = 2.5f;
+      if (g->LastLinkErrSeq != shown_seq) { shown_seq = g->LastLinkErrSeq; toast_t0 = (float)ImGui::GetTime(); }
+      const float age = (float)ImGui::GetTime() - toast_t0;
+      if (g->LastLinkErr[0] && g->LastLinkErrSeq > 0 && age < kFade)
+      {
+        const float em = ImGui::GetFontSize();
+        const ImVec2 mn = ImGui::GetItemRectMin();
+        const ImVec2 mx = ImGui::GetItemRectMax();
+        char msg[IM_LABEL_SIZE + 32];
+        ImFormatString(msg, IM_ARRAYSIZE(msg), "link refused: %s", g->LastLinkErr);
+        const ImVec2 ts = ImGui::CalcTextSize(msg);
+        const ImU32 col = ImGui::GetColorU32(ImVec4(0.90f, 0.45f, 0.45f, 1.0f - age / kFade));
+        ImGui::GetWindowDrawList()->AddText(ImVec2(mn.x + em * 0.6f, mx.y - em * 0.6f - ts.y), col, msg);
+      }
+    }
+
+    // Cross-view selection sync (Theme C). Valid here: NumSelectedNodes asserts CurrentScope==None, satisfied
+    // after EndNodeEditor. Order: dangle guard -> canvas read-back -> tree apply + reveal.
+    if (selected_node_id != nullptr)
+    {
+      static int applied_sel = -1;
+
+      // 1) Dangle guard: a deleted / stripped / reloaded id must not highlight a ghost.
+      if (*selected_node_id >= 0 && AppGraphFindNode(g, *selected_node_id) == nullptr)
+        *selected_node_id = -1;
+
+      // 2) Canvas -> tree read-back: a single canvas selection writes itself to *selected_node_id (closes the
+      //    one-way gap). A multi-select leaves *selected_node_id unchanged (single-select model).
+      bool canvas_originated = false;
+      if (ImNodes::NumSelectedNodes() == 1)
+      {
+        int picked = -1;
+        ImNodes::GetSelectedNodes(&picked);
+        if (picked != *selected_node_id) { *selected_node_id = picked; canvas_originated = true; }
+      }
+
+      // 3) Tree -> canvas apply + reveal: an external (tree) change outlines AND pans the node into view. Never
+      //    pan on a canvas-originated change (don't yank the viewport on a click).
+      if (*selected_node_id != applied_sel)
+      {
+        // Apply only to a node imnodes actually submitted this frame: a hidden live node (tree still lists it)
+        // was evicted from the pool, so SelectNode/MoveToNode on it would assert.
+        ImGuiAppNode* tn = (*selected_node_id >= 0) ? AppGraphFindNode(g, *selected_node_id) : nullptr;
+        const bool submitted = tn != nullptr && !(!show_live && tn->IsLive);
+        if (submitted && !canvas_originated)
+        {
+          ImNodes::ClearNodeSelection();
+          ImNodes::SelectNode(*selected_node_id);   // highlight only -- no auto-pan (it yanked the whole canvas)
+        }
+        applied_sel = *selected_node_id;
+      }
+    }
+  }
+
+  void AppGraphSelectionBreadcrumb(const ImGuiAppGraph* g, int node_id, char* buf, int buf_size)
+  {
+    IM_ASSERT(g != nullptr && buf != nullptr && buf_size > 0);
+
+    const ImGuiAppNode* n = node_id >= 0 ? AppGraphFindNodeConst(g, node_id) : nullptr;
+    if (n == nullptr) { ImStrncpy(buf, "sel: -", (size_t)buf_size); return; }
+
+    const char* tag = n->IsLive ? "live" : n->IsPromoted ? "promoted" : "design";
+    const int parent = AppGraphParentOf(g, n->Id);
+    const ImGuiAppNode* pn = parent >= 0 ? AppGraphFindNodeConst(g, parent) : nullptr;
+    if (pn != nullptr)
+      ImFormatString(buf, buf_size, "sel: %s > %s [%s]", pn->Draft.Name, n->Draft.Name, tag);
+    else
+      ImFormatString(buf, buf_size, "sel: %s [%s]", n->Draft.Name, tag);
   }
 
   //-----------------------------------------------------------------------------
@@ -1121,6 +1901,53 @@ namespace ImGui
     dst[n] = 0;
   }
 
+  static void AppCommandEnumValue(const ImGuiAppCommandDesc* cmd, char* out, size_t out_size)
+  {
+    char base[IM_LABEL_SIZE];
+    AppSanitizeIdentifier(base, IM_ARRAYSIZE(base), cmd->Name);
+    ImFormatString(out, (int)out_size, "AppCommand_%s", base);
+  }
+
+  static void AppEmitCommandEnumAndApp(const ImGuiAppGraph* g, ImGuiTextBuffer* out)
+  {
+    if (AppGraphCommandDefinitionCount(g) == 0)
+      return;
+
+    out->appendf("enum ClientAppCommand\n{\n");
+    out->appendf("  AppCommand_None = ImGuiAppCommand_None,\n");
+    out->appendf("  AppCommand_Shutdown = ImGuiAppCommand_Shutdown,\n");
+    int offset = 0;
+    for (int i = 0; i < g->Nodes.Size; i++)
+    {
+      const ImGuiAppNode* n = &g->Nodes.Data[i];
+      if (!AppNodeIsCommandLayer(n)) continue;
+      for (int c = 0; c < n->Commands.Size; c++)
+      {
+        char enum_value[IM_LABEL_SIZE];
+        AppCommandEnumValue(&n->Commands.Data[c], enum_value, IM_ARRAYSIZE(enum_value));
+        out->appendf("  %s = ImGuiAppCommand_COUNT + %d,\n", enum_value, offset++);
+      }
+    }
+    out->appendf("  AppCommand_COUNT\n};\n\n");
+
+    out->appendf("struct ClientApp : ImGuiApp\n{\n");
+    out->appendf("  virtual void OnExecuteCommand(ImGuiAppCommand cmd) override\n  {\n");
+    out->appendf("    switch ((ClientAppCommand)cmd)\n    {\n");
+    for (int i = 0; i < g->Nodes.Size; i++)
+    {
+      const ImGuiAppNode* n = &g->Nodes.Data[i];
+      if (!AppNodeIsCommandLayer(n)) continue;
+      for (int c = 0; c < n->Commands.Size; c++)
+      {
+        char enum_value[IM_LABEL_SIZE];
+        AppCommandEnumValue(&n->Commands.Data[c], enum_value, IM_ARRAYSIZE(enum_value));
+        out->appendf("    case %s:\n      // TODO: handle %s\n      break;\n", enum_value, n->Commands.Data[c].Name);
+      }
+    }
+    out->appendf("    default:\n      ImGuiApp::OnExecuteCommand(cmd);\n      break;\n");
+    out->appendf("    }\n  }\n};\n\n");
+  }
+
   static const ImGuiAppNode* AppGraphFindNodeConst(const ImGuiAppGraph* g, int node_id)
   {
     for (int i = 0; i < g->Nodes.Size; i++)
@@ -1134,10 +1961,11 @@ namespace ImGui
     out_control_ids->clear();
     if (err && err_size > 0) err[0] = 0;
 
-    // Collect control node ids (stable order = node order, for deterministic output).
+    // Collect AUTHORED control node ids (stable order = node order, for deterministic output). Live-mirror
+    // controls are excluded: they are never emitted, so the topo/health domain matches the codegen domain.
     ImVector<int> ctrl;
     for (int i = 0; i < g->Nodes.Size; i++)
-      if (g->Nodes.Data[i].Kind == ImGuiAppNodeKind_Control)
+      if (g->Nodes.Data[i].Kind == ImGuiAppNodeKind_Control && !g->Nodes.Data[i].IsLive)
         ctrl.push_back(g->Nodes.Data[i].Id);
 
     // In-degree = number of incoming data edges (producer -> this consumer).
@@ -1264,6 +2092,28 @@ namespace ImGui
     emit_dep_params(out);
     out->appendf(") const override final\n  {\n    IM_UNUSED(app); IM_UNUSED(data);\n    // TODO: initialize persistent data\n  }\n\n");
 
+    out->appendf("  virtual void OnGetCommand(const ImGuiApp* app, ImGuiAppCommand* cmd, const %sData* data, const %sTempData* temp_data", base, base);
+    emit_dep_params(out);
+    out->appendf(") const override final\n  {\n    IM_UNUSED(app); IM_UNUSED(cmd); IM_UNUSED(data); IM_UNUSED(temp_data);\n");
+    if (n->Commands.Size > 0)
+    {
+      out->appendf("    // TODO: emit one of this control's commands from UI/control state, for example:\n");
+      for (int c = 0; c < n->Commands.Size; c++)
+      {
+        if (AppGraphFindCommandDefinition(g, n->Commands.Data[c].Name) == nullptr)
+        {
+          out->appendf("    // TODO: command '%s' is not defined on CommandLayer\n", n->Commands.Data[c].Name);
+          continue;
+        }
+        char enum_value[IM_LABEL_SIZE];
+        AppCommandEnumValue(&n->Commands.Data[c], enum_value, IM_ARRAYSIZE(enum_value));
+        out->appendf("    // *cmd = (ImGuiAppCommand)%s;\n", enum_value);
+      }
+    }
+    else
+      out->appendf("    // TODO: set *cmd when this control should request an app command\n");
+    out->appendf("  }\n\n");
+
     out->appendf("  virtual void OnUpdate(float dt, %sData* data, const %sTempData* temp_data, const %sTempData* last_temp_data", base, base, base);
     emit_dep_params(out);
     out->appendf(") const override final\n  {\n    IM_UNUSED(dt); IM_UNUSED(data); IM_UNUSED(temp_data); IM_UNUSED(last_temp_data);\n");
@@ -1291,6 +2141,8 @@ namespace ImGui
           const bool types_ok = dn->IsBuiltin || (dst_t >= 0 && src_t >= 0 && dst_t == src_t);
           if (dst_id[0] && src_id[0] && types_ok)
             out->appendf("    data->%s = %s->%s;\n", dst_id, dparam, src_id);
+          else if (dst_id[0] && src_id[0])
+            out->appendf("    // WARNING: dropped binding %s = %s (type mismatch)\n", dst_id, src_id);
         }
       }
     }
@@ -1313,6 +2165,68 @@ namespace ImGui
     return -1;
   }
 
+  ImGuiID AppGraphSignature(const ImGuiAppGraph* g)
+  {
+    IM_ASSERT(g != nullptr);
+
+    // Fold the authored (!IsLive) population plus command definitions attached to the CommandLayer. Live mirror
+    // node churn still stays out of the hash. char[] hashed as NUL-terminated ImHashStr (ctors zero only byte 0,
+    // so ImHashData over the fixed buffer would fold trailing garbage). GridPos/ids/BodyAttrId excluded.
+    ImGuiID h = 0;
+    for (int i = 0; i < g->Nodes.Size; i++)
+    {
+      const ImGuiAppNode* n = &g->Nodes.Data[i];
+      if (n->IsLive)
+      {
+        if (AppNodeIsCommandLayer(n))
+          for (int c = 0; c < n->Commands.Size; c++)
+            h = ImHashStr(n->Commands.Data[c].Name, 0, h);
+        continue;
+      }
+      h = ImHashData(&n->Kind, sizeof(n->Kind), h);
+      h = ImHashStr(n->Draft.Name, 0, h);
+      h = ImHashStr(n->TypeName, 0, h);
+      h = ImHashStr(n->DataTypeName, 0, h);
+      h = ImHashData(&n->IsBuiltin, sizeof(n->IsBuiltin), h);
+      h = ImHashData(&n->LayerType, sizeof(n->LayerType), h);
+      for (int f = 0; f < n->Draft.PersistFields.Size; f++)
+      {
+        const ImGuiAppFieldDesc* fd = &n->Draft.PersistFields.Data[f];
+        h = ImHashStr(fd->Name, 0, h);
+        h = ImHashData(&fd->Type, sizeof(fd->Type), h);
+        h = ImHashData(&fd->ArraySize, sizeof(fd->ArraySize), h);
+      }
+      for (int f = 0; f < n->Draft.TempFields.Size; f++)
+      {
+        const ImGuiAppFieldDesc* fd = &n->Draft.TempFields.Data[f];
+        h = ImHashStr(fd->Name, 0, h);
+        h = ImHashData(&fd->Type, sizeof(fd->Type), h);
+        h = ImHashData(&fd->ArraySize, sizeof(fd->ArraySize), h);
+      }
+      for (int c = 0; c < n->Commands.Size; c++)
+        h = ImHashStr(n->Commands.Data[c].Name, 0, h);
+    }
+    for (int li = 0; li < g->Links.Size; li++)
+    {
+      const ImGuiAppNodeLink* l = &g->Links.Data[li];
+      const int oa = AppGraphPortOwnerId(g, l->StartAttr);
+      const int ob = AppGraphPortOwnerId(g, l->EndAttr);
+      const ImGuiAppNode* na = oa >= 0 ? AppGraphFindNodeConst(g, oa) : nullptr;
+      const ImGuiAppNode* nb = ob >= 0 ? AppGraphFindNodeConst(g, ob) : nullptr;
+      if (na == nullptr || nb == nullptr || na->IsLive || nb->IsLive) continue;   // authored links only
+      h = ImHashData(&l->StartAttr, sizeof(l->StartAttr), h);   // stable port ids: capture connectivity changes
+      h = ImHashData(&l->EndAttr, sizeof(l->EndAttr), h);
+      h = ImHashData(&l->Kind, sizeof(l->Kind), h);
+      for (int bi = 0; bi < g->Bindings.Size; bi++)
+      {
+        if (g->Bindings.Data[bi].LinkId != l->Id) continue;
+        h = ImHashStr(g->Bindings.Data[bi].DstField, 0, h);
+        h = ImHashStr(g->Bindings.Data[bi].SrcField, 0, h);
+      }
+    }
+    return h;
+  }
+
   void GenerateAppGraphCode(const ImGuiAppGraph* g, ImGuiTextBuffer* out)
   {
     IM_ASSERT(g != nullptr && out != nullptr);
@@ -1326,7 +2240,10 @@ namespace ImGui
       return;
     }
 
-    // 2) Emit data structs + control structs for DRAFTED controls in topo order (builtin types already exist).
+    // 2) Emit client command enum/app shell, then data structs + control structs for DRAFTED controls in topo
+    // order (builtin types already exist).
+    AppEmitCommandEnumAndApp(g, out);
+
     for (int i = 0; i < order.Size; i++)
     {
       const ImGuiAppNode* n = AppGraphFindNodeConst(g, order.Data[i]);
@@ -1340,13 +2257,13 @@ namespace ImGui
     for (int i = 0; i < g->Nodes.Size; i++)
     {
       const ImGuiAppNode* n = &g->Nodes.Data[i];
-      if (n->Kind == ImGuiAppNodeKind_Layer)
+      if (n->Kind == ImGuiAppNodeKind_Layer && !n->IsLive)
         out->appendf("  PushAppLayer<%s>(app);\n", AppLayerTypeName(n->LayerType));
     }
     for (int i = 0; i < g->Nodes.Size; i++)
     {
       const ImGuiAppNode* n = &g->Nodes.Data[i];
-      if (n->Kind == ImGuiAppNodeKind_Window)
+      if (n->Kind == ImGuiAppNodeKind_Window && !n->IsLive)
       {
         char base[IM_LABEL_SIZE]; AppNodeBaseName(n, base, IM_ARRAYSIZE(base));
         out->appendf("  PushAppWindow<%s>(app);\n", base);
@@ -1355,7 +2272,7 @@ namespace ImGui
     for (int i = 0; i < g->Nodes.Size; i++)
     {
       const ImGuiAppNode* n = &g->Nodes.Data[i];
-      if (n->Kind == ImGuiAppNodeKind_Sidebar)
+      if (n->Kind == ImGuiAppNodeKind_Sidebar && !n->IsLive)
       {
         char base[IM_LABEL_SIZE]; AppNodeBaseName(n, base, IM_ARRAYSIZE(base));
         out->appendf("  PushAppSidebar<%s>(app, vp, ImGuiDir_Down, 0.0f, ImGuiWindowFlags_None);\n", base);
@@ -1371,7 +2288,10 @@ namespace ImGui
       if (pn && pn->Kind == ImGuiAppNodeKind_Sidebar)
         out->appendf("  PushSidebarControl<%s>(app, app->Sidebars.back()); // hosted by %s\n", base, pn->Draft.Name);
       else if (pn && pn->Kind == ImGuiAppNodeKind_Window)
-        out->appendf("  PushAppControl<%s>(app); // TODO: host in window '%s' (PushWindowControl unimplemented)\n", base, pn->Draft.Name);
+      {
+        out->appendf("  // WARNING: control '%s' cannot be hosted in window '%s' yet (PushWindowControl unimplemented)\n", base, pn->Draft.Name);
+        out->appendf("  PushAppControl<%s>(app);\n", base);
+      }
       else
         out->appendf("  PushAppControl<%s>(app);\n", base);
     }
@@ -1408,6 +2328,8 @@ namespace ImGui
         buf.appendf("Persist=%s,%d,%d\n", n->Draft.PersistFields.Data[f].Name, (int)n->Draft.PersistFields.Data[f].Type, n->Draft.PersistFields.Data[f].ArraySize);
       for (int f = 0; f < n->Draft.TempFields.Size; f++)
         buf.appendf("Temp=%s,%d,%d\n", n->Draft.TempFields.Data[f].Name, (int)n->Draft.TempFields.Data[f].Type, n->Draft.TempFields.Data[f].ArraySize);
+      for (int c = 0; c < n->Commands.Size; c++)
+        buf.appendf("Command=%s\n", n->Commands.Data[c].Name);
     }
     for (int i = 0; i < g->Links.Size; i++)
       buf.appendf("Link=%d,%d,%d,%d\n", g->Links.Data[i].Id, g->Links.Data[i].StartAttr, g->Links.Data[i].EndAttr, (int)g->Links.Data[i].Kind);
@@ -1440,6 +2362,34 @@ namespace ImGui
   static void AppGraphSynthesizeControlPorts(ImGuiAppGraph* g, ImGuiAppNode* n)
   {
     AppGraphStampPorts(g, n);
+  }
+
+  static bool AppNodeKeepsPortKind(const ImGuiAppNode* n, ImGuiAppPortKind kind)
+  {
+    switch (n->Kind)
+    {
+    case ImGuiAppNodeKind_App:
+      return kind == ImGuiAppPortKind_ChildIn;
+    case ImGuiAppNodeKind_Layer:
+      return false;
+    case ImGuiAppNodeKind_Window:
+    case ImGuiAppNodeKind_Sidebar:
+      return kind == ImGuiAppPortKind_ChildIn || kind == ImGuiAppPortKind_ChildOut;
+    case ImGuiAppNodeKind_Control:
+    default:
+      return kind == ImGuiAppPortKind_DataIn || kind == ImGuiAppPortKind_DataOut || kind == ImGuiAppPortKind_ChildOut;
+    }
+  }
+
+  static void AppGraphNormalizeLoadedPorts(ImGuiAppGraph* g)
+  {
+    for (int i = 0; i < g->Nodes.Size; i++)
+    {
+      ImGuiAppNode* n = &g->Nodes.Data[i];
+      for (int p = n->Ports.Size - 1; p >= 0; p--)
+        if (!AppNodeKeepsPortKind(n, n->Ports.Data[p].Kind))
+          n->Ports.erase(n->Ports.Data + p);
+    }
   }
 
   bool LoadAppGraph(const char* path, ImGuiAppGraph* g)
@@ -1514,6 +2464,7 @@ namespace ImGui
       else if (strncmp(p, "Port=", 5) == 0)      { if (cur) { AppGraphParsePort(cur, p + 5); int last = cur->Ports.Size ? cur->Ports.Data[cur->Ports.Size - 1].Id : 0; if (last > max_id) max_id = last; } }
       else if (strncmp(p, "Persist=", 8) == 0)   { if (cur) AppNodeParseField(&cur->Draft.PersistFields, p + 8); }
       else if (strncmp(p, "Temp=", 5) == 0)      { if (cur) AppNodeParseField(&cur->Draft.TempFields, p + 5); }
+      else if (strncmp(p, "Command=", 8) == 0)   { if (cur) AppNodeAddCommand(cur, p + 8); }
       else if (strncmp(p, "Link=", 5) == 0)
       {
         ImGuiAppNodeLink l; int kind = ImGuiAppEdgeKind_Data;
@@ -1534,6 +2485,8 @@ namespace ImGui
       AppGraphSynthesizeControlPorts(g, cur);
 
     IM_FREE(data);
+
+    AppGraphNormalizeLoadedPorts(g);
 
     // Drop links whose endpoints don't resolve to any port (e.g. legacy inert attr ids that no synthesized
     // port matches), so the loaded model is always self-consistent.
@@ -1578,6 +2531,7 @@ namespace ImGui
   };
 
   static const char* AppLayerTypeName(ImGuiAppLayerType t);   // fwd (defined above)
+  static const char* AppLayerNodeName(ImGuiAppLayerType t);   // fwd (defined above)
 
   void BuildAppLiveGraph(const ImGuiApp* app, ImGuiAppGraph* g)
   {
@@ -1594,7 +2548,7 @@ namespace ImGui
       AppLiveWant w; w.Kind = ImGuiAppNodeKind_Layer; w.Key = 0x4C000000u + (ImGuiID)i;
       w.DataId = 0; w.DepCount = 0;
       w.LayerType = (i < ImGuiAppLayerType_COUNT) ? (ImGuiAppLayerType)i : ImGuiAppLayerType_Task;
-      if (i < ImGuiAppLayerType_COUNT) ImFormatString(w.Name, IM_ARRAYSIZE(w.Name), "%s", AppLayerTypeName((ImGuiAppLayerType)i));
+      if (i < ImGuiAppLayerType_COUNT) ImFormatString(w.Name, IM_ARRAYSIZE(w.Name), "%s", AppLayerNodeName((ImGuiAppLayerType)i));
       else                              ImFormatString(w.Name, IM_ARRAYSIZE(w.Name), "Layer %d", i);
       want.push_back(w);
     }
@@ -1666,15 +2620,9 @@ namespace ImGui
           if (node->Ports.Data[p].Kind == ImGuiAppPortKind_DataOut)
             node->Ports.Data[p].DataTypeId = want.Data[w].DataId;
 
-        // Lay live nodes out in clean per-kind columns (layers | windows | sidebars | controls), one row per
-        // node. Only new nodes are placed; existing live nodes keep wherever the user dragged them.
-        const int col = (want.Data[w].Kind == ImGuiAppNodeKind_Layer)   ? 0
-                      : (want.Data[w].Kind == ImGuiAppNodeKind_Window)  ? 1
-                      : (want.Data[w].Kind == ImGuiAppNodeKind_Sidebar) ? 2 : 3;
-        int row = 0;
-        for (int j = 0; j < w; j++) if (want.Data[j].Kind == want.Data[w].Kind) row++;
-        node->GridPos = ImVec2(30.0f + col * 230.0f, 30.0f + row * 100.0f);
-        node->_NeedsPlace = true;
+        // New live nodes share the same composition-first placement as authored nodes:
+        // layers/app | windows/sidebars | controls. Existing live nodes keep user-dragged positions.
+        AppGraphPlaceNode(g, node, nullptr);
       }
     }
     // Build the per-key port map (after all adds, pointers are stable until next mutation; we only read here).
@@ -1740,59 +2688,75 @@ namespace ImGui
   void ShowAppGraphTree(const ImGuiApp* app, ImGuiAppGraph* g, int* selected_node_id)
   {
     IM_ASSERT(g != nullptr);
+    IM_UNUSED(app);   // the graph already mirrors the live app, so it is the single outliner source (#16)
 
-    if (app != nullptr)
+    // Grouped outliner: Layers / Sidebars / Controls / App sections, every row selectable + origin-tinted.
+    // Window nodes are NOT a separate section -- they nest under the Window-layer node (ImGuiAppWindowLayer
+    // owns the windows).
+    auto Row = [&](ImGuiAppNode* n)
     {
-      ImGui::SeparatorText("Live app");
+      const char* tag = n->IsLive ? " [live]" : n->IsPromoted ? " [promoted]" : "";
+      char label[IM_LABEL_SIZE + 32];
+      ImFormatString(label, IM_ARRAYSIZE(label), "%s%s##n%d", n->Draft.Name[0] ? n->Draft.Name : "(unnamed)", tag, n->Id);
+      const bool selrow = selected_node_id && *selected_node_id == n->Id;
+      const ImU32 tint = AppGraphOriginColor(n);   // same constants as the canvas tint + legend
+      if (tint) ImGui::PushStyleColor(ImGuiCol_Text, tint);
+      if (ImGui::Selectable(label, selrow) && selected_node_id) *selected_node_id = n->Id;
+      if (tint) ImGui::PopStyleColor();
+    };
+    auto CountKind = [&](ImGuiAppNodeKind k) { int c = 0; for (int i = 0; i < g->Nodes.Size; i++) if (g->Nodes.Data[i].Kind == k) c++; return c; };
 
-      if (ImGui::TreeNodeEx("##layers", ImGuiTreeNodeFlags_DefaultOpen, "Layers (%d)", app->Layers.Size))
-      {
-        for (int i = 0; i < app->Layers.Size; i++)
-          ImGui::BulletText("%s", (i < ImGuiAppLayerType_COUNT) ? AppLayerTypeName((ImGuiAppLayerType)i) : "Layer");
-        ImGui::TreePop();
-      }
-      if (ImGui::TreeNodeEx("##windows", ImGuiTreeNodeFlags_DefaultOpen, "Windows (%d)", app->Windows.Size))
-      {
-        for (int i = 0; i < app->Windows.Size; i++)
-          ImGui::BulletText("%s", app->Windows.Data[i]->Label[0] ? app->Windows.Data[i]->Label : "Window");
-        ImGui::TreePop();
-      }
-      if (ImGui::TreeNodeEx("##sidebars", ImGuiTreeNodeFlags_DefaultOpen, "Sidebars (%d)", app->Sidebars.Size))
-      {
-        for (int i = 0; i < app->Sidebars.Size; i++)
-          ImGui::BulletText("%s", app->Sidebars.Data[i]->Label[0] ? app->Sidebars.Data[i]->Label : "Sidebar");
-        ImGui::TreePop();
-      }
-      if (ImGui::TreeNodeEx("##controls", ImGuiTreeNodeFlags_DefaultOpen, "Controls (%d)", app->Controls.Size))
-      {
-        for (int i = 0; i < app->Controls.Size; i++)
-        {
-          char nm[IM_LABEL_SIZE]; app->Controls.Data[i]->GetControlDataTypeName(nm, IM_ARRAYSIZE(nm));
-          ImGui::BulletText("%s", nm[0] ? nm : "Control");
-        }
-        ImGui::TreePop();
-      }
-    }
+    bool window_layer_exists = false;
+    for (int i = 0; i < g->Nodes.Size; i++)
+      if (g->Nodes.Data[i].Kind == ImGuiAppNodeKind_Layer && g->Nodes.Data[i].LayerType == ImGuiAppLayerType_Window)
+      { window_layer_exists = true; break; }
 
-    ImGui::SeparatorText("Graph");
-    if (ImGui::TreeNodeEx("##graph", ImGuiTreeNodeFlags_DefaultOpen, "Nodes (%d)", g->Nodes.Size))
+    // Layers -- the Window layer hosts the window nodes as nested children.
+    if (ImGui::TreeNodeEx("##layers", ImGuiTreeNodeFlags_DefaultOpen, "Layers (%d)", CountKind(ImGuiAppNodeKind_Layer)))
     {
       for (int i = 0; i < g->Nodes.Size; i++)
       {
         ImGuiAppNode* n = &g->Nodes.Data[i];
-        const char* kind = AppNodeKindName(n->Kind);
-        char label[IM_LABEL_SIZE + 32];
-        ImFormatString(label, IM_ARRAYSIZE(label), "%s  (%s%s)##n%d",
-            n->Draft.Name[0] ? n->Draft.Name : "(unnamed)", kind, n->IsLive ? ", live" : "", n->Id);
-        const bool sel = selected_node_id && *selected_node_id == n->Id;
-        if (ImGui::Selectable(label, sel))
+        if (n->Kind != ImGuiAppNodeKind_Layer) continue;
+
+        if (n->LayerType == ImGuiAppLayerType_Window)
         {
-          if (selected_node_id) *selected_node_id = n->Id;
-          ImNodes::ClearNodeSelection();
-          ImNodes::SelectNode(n->Id);
+          const char* tag = n->IsLive ? " [live]" : n->IsPromoted ? " [promoted]" : "";
+          char label[IM_LABEL_SIZE + 32];
+          ImFormatString(label, IM_ARRAYSIZE(label), "%s%s##n%d", n->Draft.Name[0] ? n->Draft.Name : "(unnamed)", tag, n->Id);
+          ImGuiTreeNodeFlags f = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth | ImGuiTreeNodeFlags_DefaultOpen;
+          if (selected_node_id && *selected_node_id == n->Id) f |= ImGuiTreeNodeFlags_Selected;
+          const ImU32 tint = AppGraphOriginColor(n);
+          if (tint) ImGui::PushStyleColor(ImGuiCol_Text, tint);
+          const bool open = ImGui::TreeNodeEx(label, f);
+          if (tint) ImGui::PopStyleColor();
+          if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen() && selected_node_id) *selected_node_id = n->Id;
+          if (open)
+          {
+            for (int wj = 0; wj < g->Nodes.Size; wj++)
+              if (g->Nodes.Data[wj].Kind == ImGuiAppNodeKind_Window) Row(&g->Nodes.Data[wj]);
+            ImGui::TreePop();
+          }
         }
+        else
+          Row(n);
       }
       ImGui::TreePop();
     }
+
+    // Windows fallback: only when there is no Window layer to host them (so they're never lost).
+    if (!window_layer_exists && CountKind(ImGuiAppNodeKind_Window) > 0)
+      if (ImGui::TreeNodeEx("##windows", ImGuiTreeNodeFlags_DefaultOpen, "Windows (%d)", CountKind(ImGuiAppNodeKind_Window)))
+      { for (int i = 0; i < g->Nodes.Size; i++) if (g->Nodes.Data[i].Kind == ImGuiAppNodeKind_Window) Row(&g->Nodes.Data[i]); ImGui::TreePop(); }
+
+    if (ImGui::TreeNodeEx("##sidebars", ImGuiTreeNodeFlags_DefaultOpen, "Sidebars (%d)", CountKind(ImGuiAppNodeKind_Sidebar)))
+    { for (int i = 0; i < g->Nodes.Size; i++) if (g->Nodes.Data[i].Kind == ImGuiAppNodeKind_Sidebar) Row(&g->Nodes.Data[i]); ImGui::TreePop(); }
+
+    if (ImGui::TreeNodeEx("##controls", ImGuiTreeNodeFlags_DefaultOpen, "Controls (%d)", CountKind(ImGuiAppNodeKind_Control)))
+    { for (int i = 0; i < g->Nodes.Size; i++) if (g->Nodes.Data[i].Kind == ImGuiAppNodeKind_Control) Row(&g->Nodes.Data[i]); ImGui::TreePop(); }
+
+    if (CountKind(ImGuiAppNodeKind_App) > 0)
+      if (ImGui::TreeNodeEx("##app", ImGuiTreeNodeFlags_DefaultOpen, "App (%d)", CountKind(ImGuiAppNodeKind_App)))
+      { for (int i = 0; i < g->Nodes.Size; i++) if (g->Nodes.Data[i].Kind == ImGuiAppNodeKind_App) Row(&g->Nodes.Data[i]); ImGui::TreePop(); }
   }
 }
