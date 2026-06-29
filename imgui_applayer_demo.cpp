@@ -207,115 +207,40 @@ namespace
     }
   };
 
-  // Reflection-capable dataflow payloads: the scalar data that actually flows between nodes.
-  // The live control structs (RandomTimeData/BreathingControlData) carry char[] label/type
-  // buffers, which are outside the reflection subset (reflect miscounts raw arrays), so node
-  // rows reflect these focused aggregates instead. This is the shape codegen will emit.
-  struct RandomTimeNodeData  { float max_timer_secs; };
-  struct BreathingNodeData   { float timer_secs; };
-
-  // imnodes data-flow graph: shows the Breathing control's duration input being fed by the
-  // Random Time control (its source) when active, or a Default node otherwise.
-  void ShowDataFlowGraph(ImGuiApp* app, bool show_random_time, bool show_breathing, ImVector<ImGuiAppNodeDraft>* drafts,
-                         ImVector<ImGuiAppNodeLink>* links, int* next_link_id)
+  // Seed a fresh graph. The graph IS the app: the collective of layer/window/control nodes composes it,
+  // so there is no "App" container node. Seed one window + one control to show the two pillars at once.
+  void SeedAppGraph(ImGuiAppGraph* graph)
   {
-    IM_ASSERT(app != nullptr);
+    ImGui::AppGraphAddNode(graph, ImGuiAppNodeKind_Window,  "MainWindow");
+    ImGui::AppGraphAddNode(graph, ImGuiAppNodeKind_Control, "NewControl");
+  }
 
-    // Fixed nodes/attrs use the low ids; drafts get their own id ranges so an arbitrary number of
-    // them never collides with the fixed nodes (or each other).
-    enum { NODE_RT = 1, NODE_DEFAULT, NODE_BREATHING, ATTR_RT_OUT = 10, ATTR_DEFAULT_OUT, ATTR_BR_IN,
-           NODE_DRAFT_BASE = 100, ATTR_DRAFT_BASE = 200 };
-
-    RandomTimeData*             rt = static_cast<RandomTimeData*>(app->Data.GetVoidPtr(ImGuiType<RandomTimeData>::ID));
-    const BreathingControlData* br = static_cast<const BreathingControlData*>(app->Data.GetVoidPtr(ImGuiType<BreathingControlData>::ID));
-
-    static bool placed_rt = false, placed_default = false, placed_breathing = false;
-
-    ImNodes::BeginNodeEditor();
-
-    // Positions must be set BEFORE BeginNode: imnodes lays out node content at the node's current
-    // origin and later (in EndNodeEditor) calls SetCursorPos(origin) to draw it. Setting the origin
-    // after EndNode leaves content at the old origin while the draw cursor jumps to the new one,
-    // past the canvas content max -> trips imgui's "extend boundaries" assert.
-    // Node titles come from reflect::type_name; field rows come from reflection over the control's
-    // data struct (DrawAppNodeFields) instead of a hand-listed set of members. Ports still carry the
-    // dataflow semantics (an output "source" on the duration provider, an input on Breathing).
-    if (show_random_time)
+  // "+ Add node" palette: layers, windows, sidebars, controls -- the pieces that compose the app. Builtin
+  // controls are backed by the demo's compiled types (RandomTime / Breathing) so their real data types
+  // become wireable graph nodes.
+  void ShowNodePalette(ImGuiAppGraph* graph)
+  {
+    if (ImGui::BeginMenu("Control"))
     {
-      if (!placed_rt) { ImNodes::SetNodeGridSpacePos(NODE_RT, ImVec2(24.0f, 24.0f)); placed_rt = true; }
-      ImGui::BeginAppNode(NODE_RT, "Random Time");
-      // Inline edit: reflect the scalar payload, edit it, write the change back to the live control.
-      RandomTimeNodeData rt_node = { rt ? rt->max_timer_secs : 0.0f };
-      if (ImGui::EditAppNodeFields(&rt_node) && rt)
-        rt->max_timer_secs = rt_node.max_timer_secs;
-      ImNodes::BeginOutputAttribute(ATTR_RT_OUT); ImGui::TextUnformatted("source"); ImNodes::EndOutputAttribute();
-      ImGui::EndAppNode();
+      if (ImGui::MenuItem("New control (draft)"))
+        ImGui::AppGraphAddNode(graph, ImGuiAppNodeKind_Control, "NewControl");
+      ImGui::Separator();
+      if (ImGui::MenuItem("Random Time (builtin)"))
+        ImGui::AppGraphAddBuiltin(graph, ImGuiAppNodeKind_Control, "RandomTime", "RandomTimeData");
+      if (ImGui::MenuItem("Breathing (builtin)"))
+        ImGui::AppGraphAddBuiltin(graph, ImGuiAppNodeKind_Control, "Breathing", "BreathingData");
+      ImGui::EndMenu();
     }
-    else if (show_breathing)
+    if (ImGui::BeginMenu("Layer"))
     {
-      if (!placed_default) { ImNodes::SetNodeGridSpacePos(NODE_DEFAULT, ImVec2(24.0f, 24.0f)); placed_default = true; }
-      ImGui::BeginAppNode(NODE_DEFAULT, "Default");
-      ImGui::Text("%.1f s", 5.0f);
-      ImNodes::BeginOutputAttribute(ATTR_DEFAULT_OUT); ImGui::TextUnformatted("source"); ImNodes::EndOutputAttribute();
-      ImGui::EndAppNode();
+      if (ImGui::MenuItem("Task"))    { ImGuiAppNode* n = ImGui::AppGraphAddNode(graph, ImGuiAppNodeKind_Layer, "TaskLayer");    n->LayerType = ImGuiAppLayerType_Task;    }
+      if (ImGui::MenuItem("Command")) { ImGuiAppNode* n = ImGui::AppGraphAddNode(graph, ImGuiAppNodeKind_Layer, "CommandLayer"); n->LayerType = ImGuiAppLayerType_Command; }
+      if (ImGui::MenuItem("Status"))  { ImGuiAppNode* n = ImGui::AppGraphAddNode(graph, ImGuiAppNodeKind_Layer, "StatusLayer");  n->LayerType = ImGuiAppLayerType_Status;  }
+      if (ImGui::MenuItem("Window"))  { ImGuiAppNode* n = ImGui::AppGraphAddNode(graph, ImGuiAppNodeKind_Layer, "WindowLayer");  n->LayerType = ImGuiAppLayerType_Window;  }
+      ImGui::EndMenu();
     }
-
-    if (show_breathing)
-    {
-      if (!placed_breathing) { ImNodes::SetNodeGridSpacePos(NODE_BREATHING, ImVec2(224.0f, 48.0f)); placed_breathing = true; }
-      ImGui::BeginAppNode(NODE_BREATHING, "Breathing");
-      ImNodes::BeginInputAttribute(ATTR_BR_IN); ImGui::TextUnformatted("duration"); ImNodes::EndInputAttribute();
-      BreathingNodeData br_node = { br ? br->timer_secs : 0.0f };
-      ImGui::DrawAppNodeFields(&br_node);
-      ImGui::EndAppNode();
-    }
-
-    // Design-phase nodes: each draft is edited in place, inside its own node. Interactive widgets
-    // inside an imnodes node must live in an attribute (here a static one) so the canvas does not
-    // pan/drag while the user types or opens the type combos. The user adds drafts from the side
-    // panel; each new one is positioned once (staggered) and dragged freely thereafter.
-    int draft_to_remove = -1;
-    if (drafts)
-    {
-      static int placed_draft_count = 0;
-      static int editing_node_id = -1;               // which draft node's title is being renamed (-1 = none)
-      for (int i = 0; i < drafts->Size; i++)
-      {
-        ImGuiAppNodeDraft* draft = &drafts->Data[i];
-        const int node_id = NODE_DRAFT_BASE + i;
-        const int attr_id = ATTR_DRAFT_BASE + i;
-
-        if (i >= placed_draft_count)
-          ImNodes::SetNodeGridSpacePos(node_id, ImVec2(224.0f + (i % 3) * 48.0f, 200.0f + (i % 3) * 48.0f));
-
-        // Title is the name: click it to rename inline. The body holds just the fields now.
-        ImGui::BeginAppNodeRenamable(node_id, draft->Name, IM_ARRAYSIZE(draft->Name), &editing_node_id);
-        ImNodes::BeginStaticAttribute(attr_id);
-        ImGui::PushID(i);                              // disambiguate the per-row widget ids across drafts
-        ImGui::EditAppNodeDraftFields(draft);
-        if (ImGui::SmallButton("Delete node"))
-          draft_to_remove = i;
-        ImGui::PopID();
-        ImNodes::EndStaticAttribute();
-        ImGui::EndAppNode();
-      }
-      if (drafts->Size > placed_draft_count)
-        placed_draft_count = drafts->Size;
-
-      // Deferred erase: mutating the vector mid-draw would invalidate the draft pointers above.
-      if (draft_to_remove >= 0)
-      {
-        drafts->erase(drafts->Data + draft_to_remove);
-        placed_draft_count = drafts->Size;            // re-place remaining nodes so ids shift cleanly
-      }
-    }
-
-    // Links come from the model: the user drags between ports to connect (captured below).
-    ImGui::DrawAppNodeLinks(links);
-
-    ImNodes::EndNodeEditor();
-
-    ImGui::CaptureAppNodeLinks(links, next_link_id);
+    if (ImGui::MenuItem("Window"))  ImGui::AppGraphAddNode(graph, ImGuiAppNodeKind_Window,  "Window");
+    if (ImGui::MenuItem("Sidebar")) ImGui::AppGraphAddNode(graph, ImGuiAppNodeKind_Sidebar, "Sidebar");
   }
 }
 
@@ -390,20 +315,21 @@ namespace ImGui
         const float em = ImGui::GetFontSize();
         ImGui::SetNextWindowSize(ImVec2(em * 64.0f, em * 34.0f), ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowSizeConstraints(ImVec2(em * 46.0f, em * 24.0f), ImVec2(FLT_MAX, FLT_MAX));
+        ImGui::SetNextWindowBgAlpha(1.0f);    // opaque: no other-window text bleeding through the editor
         if (ImGui::Begin("ImGuiAppLayer Metrics/Debugger", &show_metrics))
         {
-          // Persistent drafts the user designs in the graph; each renders as a live node. Links the
-          // user drags between ports live in the model alongside them. Seed one draft on first use.
-          static ImVector<ImGuiAppNodeDraft> drafts;
-          static ImVector<ImGuiAppNodeLink> links;
-          static int next_link_id = 1000;
+          // The whole authored object-model graph: App/Layer/Window/Sidebar/Control nodes, typed
+          // containment + data-dependency links, and field bindings -- one owned model with a single
+          // monotonic id allocator. Seeded on first use so the canvas is not empty.
+          static ImGuiAppGraph graph;
           static const char* graph_path = "imguix_node_graph.txt";
           static const char* header_path = "imguix_generated_control.h";
           static ImGuiTextBuffer code;
           static float code_w = 0.0f;                    // code-panel width; 0 == collapsed (default)
           static char write_msg[64] = "";                // transient "wrote header" confirmation
-          if (drafts.empty())
-            drafts.push_back(ImGuiAppNodeDraft());
+          static bool mirror_live = true;                // overlay read-only nodes mirrored from the live app (on by default)
+          if (graph.Nodes.empty())
+            SeedAppGraph(&graph);
 
           const ImGuiIO& io = ImGui::GetIO();
           const ImGuiStyle& style = ImGui::GetStyle();
@@ -428,15 +354,20 @@ namespace ImGui
           {
             // [Node]
             if (ImGui::Button("+ Add node"))
-              drafts.push_back(ImGuiAppNodeDraft());
-            ImGui::SetItemTooltip("Add a draft control node to the canvas");
+              ImGui::OpenPopup("##addnode");
+            ImGui::SetItemTooltip("Add a node (App / Layer / Window / Sidebar / Control) to the canvas");
+            if (ImGui::BeginPopup("##addnode"))
+            {
+              ShowNodePalette(&graph);
+              ImGui::EndPopup();
+            }
 
             ToolSep();
 
             // [Graph I/O] -- the popup hit-tests the Save button, so capture hover BEFORE the popup
             // and emit the tooltip AFTER, so neither clobbers the other's last-item id.
             if (ImGui::Button("Save"))
-              ImGui::SaveAppNodeGraphMulti(graph_path, &drafts, &links);
+              ImGui::SaveAppGraph(graph_path, &graph);
             const bool save_hovered = ImGui::IsItemHovered();
             if (ImGui::BeginPopupContextItem("##savepath"))
             {
@@ -448,7 +379,7 @@ namespace ImGui
               ImGui::SetTooltip("Save graph -> %s  (right-click for path)", graph_path);
             ImGui::SameLine();
             if (ImGui::Button("Load"))
-              ImGui::LoadAppNodeGraphMulti(graph_path, &drafts, &links);
+              ImGui::LoadAppGraph(graph_path, &graph);
             ImGui::SetItemTooltip("Load graph <- %s", graph_path);
 
             ToolSep();
@@ -457,12 +388,11 @@ namespace ImGui
             if (ImGui::Button("Generate"))
             {
               code.clear();
-              for (int i = 0; i < drafts.Size; i++)      // one control per drafted node
-                ImGui::GenerateAppControlCode(&drafts.Data[i], &code);
+              ImGui::GenerateAppGraphCode(&graph, &code);   // whole graph: structs + deps + bring-up, topo-ordered
               if (code_w <= 0.0f) code_w = em * 22.0f;   // auto-reveal so output is never hidden
               write_msg[0] = 0;
             }
-            ImGui::SetItemTooltip("Generate C++ from %d node(s)", drafts.Size);
+            ImGui::SetItemTooltip("Generate C++ from %d node(s)", graph.Nodes.Size);
 
             ImGui::SameLine();
             ImGui::BeginDisabled(code.size() == 0);      // nothing to write until generated
@@ -488,15 +418,24 @@ namespace ImGui
             ImGui::SetItemTooltip("Show / hide the generated-code panel");
 
             ToolSep();
+
+            // [Live] mirror the running app's controls as read-only nodes.
+            ImGui::Checkbox("Mirror live", &mirror_live);
+            ImGui::SetItemTooltip("Overlay read-only nodes mirrored from the running app's controls (Examples menu).");
+
+            ToolSep();
             HelpMarker("Drag from a node's output port to another node's input port to connect. "
                        "Click a node's title to rename it; per-node edit and Delete live inside each node. "
                        "Right-click Save for its file path.");
 
-            // Right-aligned live status: FPS (color-coded) | nodes | links | C/W/S.
-            char fps_buf[24], rest_buf[96];
+            // Right-aligned live status: FPS (color-coded) | nodes | links | topo | C/W/S.
+            ImVector<int> topo_order;
+            char topo_err[128];
+            const bool topo_ok = ImGui::AppGraphTopoOrder(&graph, &topo_order, topo_err, IM_ARRAYSIZE(topo_err));
+            char fps_buf[24], rest_buf[112];
             ImFormatString(fps_buf, IM_ARRAYSIZE(fps_buf), "%.0f FPS", io.Framerate);
-            ImFormatString(rest_buf, IM_ARRAYSIZE(rest_buf), "  nodes %d  links %d   C%d W%d S%d",
-                drafts.Size, links.Size, app.Controls.Size, app.Windows.Size, app.Sidebars.Size);
+            ImFormatString(rest_buf, IM_ARRAYSIZE(rest_buf), "  nodes %d  links %d  %s   C%d W%d S%d",
+                graph.Nodes.Size, graph.Links.Size, topo_ok ? "ok" : "CYCLE", app.Controls.Size, app.Windows.Size, app.Sidebars.Size);
             const float cluster_w = ImGui::CalcTextSize(fps_buf).x + ImGui::CalcTextSize(rest_buf).x;
             ImGui::SameLine();
             const float rx = ImGui::GetContentRegionMax().x - cluster_w;   // exact right edge (window-local)
@@ -516,17 +455,68 @@ namespace ImGui
           // 2) Body: canvas (hero) + draggable vertical splitter + collapsible code panel.
           // -------------------------------------------------------------------------------
           const ImVec2 body = ImGui::GetContentRegionAvail();
-          const float min_canvas = em * 20.0f;           // canvas never starves
+          const float tree_origin_x = ImGui::GetCursorScreenPos().x;   // screen-space left edge of the tree child
+          static float tree_w = 0.0f;                    // left outliner width (resizable)
+          if (tree_w <= 0.0f) tree_w = em * 16.0f;       // sensible default on first show (fits layer type names)
+          const float tree_grip = em * 0.5f;
+          const float min_canvas = em * 16.0f;           // canvas never starves
           const float grip_w = (code_w > 0.0f) ? em * 0.5f : 0.0f;
-          const float max_code = ImMax(0.0f, body.x - grip_w - min_canvas);   // clamp ceiling, never negative
+
+          // Resize by pinning the tree's right edge to the mouse, computed BEFORE rendering the child so the
+          // edge tracks the cursor with no per-frame lag or drift. tree_grab_dx is the offset within the grip
+          // captured at grab time, so the edge doesn't jump when you click.
+          static bool  tree_drag = false;
+          static float tree_grab_dx = 0.0f;
+          if (tree_drag)
+          {
+            if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) tree_drag = false;
+            else tree_w = io.MousePos.x - tree_grab_dx - tree_origin_x;
+          }
+
+          const float max_code = ImMax(0.0f, body.x - tree_w - tree_grip - grip_w - min_canvas);
           code_w = ImClamp(code_w, 0.0f, max_code);
-          const float canvas_w = ImMax(0.0f, body.x - code_w - grip_w);
+          tree_w = ImClamp(tree_w, em * 9.0f, ImMax(em * 9.0f, body.x - tree_grip - code_w - grip_w - min_canvas));
+          const float canvas_w = ImMax(0.0f, body.x - tree_w - tree_grip - code_w - grip_w);
+
+          // Left: scene-hierarchy tree (resizable) communicating the whole app + the authored graph.
+          static int tree_sel = -1;
+          ImGui::BeginChild("##Tree", ImVec2(tree_w, 0.0f), ImGuiChildFlags_Borders);
+          {
+            ImGui::ShowAppGraphTree(&app, &graph, &tree_sel);
+          }
+          ImGui::EndChild();
+
+          // Tree/canvas splitter.
+          ImGui::SameLine(0.0f, 0.0f);
+          ImGui::InvisibleButton("##tsplit", ImVec2(tree_grip, body.y));
+          if (ImGui::IsItemActivated()) { tree_drag = true; tree_grab_dx = io.MousePos.x - ImGui::GetItemRectMin().x; }
+          if (tree_drag || ImGui::IsItemHovered()) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+          {
+            const ImVec2 tr0 = ImGui::GetItemRectMin(), tr1 = ImGui::GetItemRectMax();
+            const float tcx = (tr0.x + tr1.x) * 0.5f;
+            const ImU32 tcol = ImGui::GetColorU32(tree_drag ? ImGuiCol_SeparatorActive
+                                                 : ImGui::IsItemHovered() ? ImGuiCol_SeparatorHovered
+                                                                          : ImGuiCol_Separator);
+            ImGui::GetWindowDrawList()->AddLine(ImVec2(tcx, tr0.y), ImVec2(tcx, tr1.y), tcol, 1.0f);
+          }
+          ImGui::SameLine(0.0f, 0.0f);
 
           ImGui::BeginChild("##NodeGraph", ImVec2(canvas_w, 0.0f), ImGuiChildFlags_Borders);
           {
-            if (links.Size == 0)                         // transient hint, gone after the first link
-              ImGui::TextDisabled("Tip: drag between node ports to connect");
-            ShowDataFlowGraph(&app, show_random_time, show_breathing, &drafts, &links, &next_link_id);
+            if (graph.Links.Size == 0)                   // transient hint, gone after the first link
+              ImGui::TextDisabled("Tip: drag a node's output port to another node's input port to connect");
+            if (mirror_live)
+              ImGui::BuildAppLiveGraph(&app, &graph);
+            else
+            {
+              // Mirror off: strip the mirrored (live) nodes so the canvas shows only authored design nodes.
+              ImVector<int> live_ids;
+              for (int i = 0; i < graph.Nodes.Size; i++)
+                if (graph.Nodes.Data[i].IsLive) live_ids.push_back(graph.Nodes.Data[i].Id);
+              for (int i = 0; i < live_ids.Size; i++)
+                ImGui::AppGraphRemoveNode(&graph, live_ids.Data[i]);
+            }
+            ShowAppGraphEditor(&app, &graph);
           }
           ImGui::EndChild();
 
@@ -581,8 +571,11 @@ namespace ImGui
         ImGui::End();
       }
 
-      // Reconcile desired -> live app. Full rebuild keeps app storage consistent across toggles.
-      if (dirty ||
+      // Reconcile desired -> live app. Full rebuild keeps app storage consistent across toggles. Also fire on
+      // first frame (!Initialized) so the framework layers (Task/Command/Status/Window) exist immediately and
+      // are visible in the tree/canvas without needing to toggle an example.
+      if (!app.IsInitialized() ||
+          dirty ||
           applied_base_window != show_base_window  ||
           applied_status_bar  != show_status_bar   ||
           applied_random_time != show_random_time  ||

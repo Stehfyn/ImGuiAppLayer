@@ -239,15 +239,74 @@ namespace ImGui
 }
 
 //-----------------------------------------------------------------------------
+// [SECTION] Typed graph kinds (node/layer/port/edge discriminators)
+//-----------------------------------------------------------------------------
+
+// A node mirrors one slot of the live ImGuiApp object model. App is the singleton root that owns the
+// Layers/Windows/Sidebars/Controls vectors (imgui_applayer.h: ImGuiApp). Layers are fixed C++ types
+// (Task/Command/Status/Window) pushed via PushAppLayer<T>; Windows/Sidebars via PushAppWindow/Sidebar<T>;
+// Controls (the only draftable kind) via PushAppControl<T>.
+typedef int ImGuiAppNodeKind;
+enum ImGuiAppNodeKind_
+{
+  ImGuiAppNodeKind_App = 0,
+  ImGuiAppNodeKind_Layer,
+  ImGuiAppNodeKind_Window,
+  ImGuiAppNodeKind_Sidebar,
+  ImGuiAppNodeKind_Control,
+  ImGuiAppNodeKind_COUNT,
+};
+
+// The four fixed layer classes (imgui_applayer.h: ImGuiAppTaskLayer..ImGuiAppWindowLayer). A Layer node
+// selects one; codegen emits PushAppLayer<ImGuiAppXxxLayer>.
+typedef int ImGuiAppLayerType;
+enum ImGuiAppLayerType_
+{
+  ImGuiAppLayerType_Task = 0,
+  ImGuiAppLayerType_Command,
+  ImGuiAppLayerType_Status,
+  ImGuiAppLayerType_Window,
+  ImGuiAppLayerType_COUNT,
+};
+
+// A port is an imnodes attribute with a role. DataOut/DataIn carry the runtime data flow; ChildOut/ChildIn
+// carry containment (which window/sidebar/app owns a node). A Control has one DataOut (its PersistData), one
+// multi-link DataIn (all its dependencies -- the runtime keys app->Data by PersistData TYPE, so one type-keyed
+// intake is faithful), and one ChildOut.
+typedef int ImGuiAppPortKind;
+enum ImGuiAppPortKind_
+{
+  ImGuiAppPortKind_DataOut = 0,
+  ImGuiAppPortKind_DataIn,
+  ImGuiAppPortKind_ChildOut,
+  ImGuiAppPortKind_ChildIn,
+  ImGuiAppPortKind_COUNT,
+};
+
+// An edge is either a data dependency (producer PersistData -> consumer dependency) or a containment edge
+// (child -> parent). The kind is derived from the linked ports' kinds at capture time.
+typedef int ImGuiAppEdgeKind;
+enum ImGuiAppEdgeKind_
+{
+  ImGuiAppEdgeKind_Data = 0,
+  ImGuiAppEdgeKind_Containment,
+  ImGuiAppEdgeKind_COUNT,
+};
+
+//-----------------------------------------------------------------------------
 // [SECTION] Graph topology and persistence (ImGuiAppNodeLink, link capture, save/load)
 //-----------------------------------------------------------------------------
 
-// A user-created dataflow edge between two node attributes (output -> input).
+// A user-created edge between two node ports (source -> target). StartAttr/EndAttr are STABLE port ids
+// (ImGuiAppNodePort::Id), not array-derived, so they survive node reorder/delete. Kind is a trailing field
+// with a default member initializer: brace-init like { id, start, end } still compiles (value-inits Kind to
+// _Data) so the legacy 3-int aggregate usage and save/load format keep working.
 struct ImGuiAppNodeLink
 {
   int Id;
   int StartAttr;
   int EndAttr;
+  ImGuiAppEdgeKind Kind = ImGuiAppEdgeKind_Data;
 };
 
 namespace ImGui
@@ -282,4 +341,134 @@ namespace ImGui
   // String field emits char[N], which (like any raw array) falls outside the reflection subset.
   // Output is appended to *out.
   IMGUI_API void GenerateAppControlCode(const ImGuiAppNodeDraft* draft, ImGuiTextBuffer* out);
+}
+
+//-----------------------------------------------------------------------------
+// [SECTION] Typed node graph (ports, nodes, graph model, factory, codegen, persistence)
+//-----------------------------------------------------------------------------
+
+// One imnodes attribute on a node, stored (never index-derived) so its id is stable across reorder/delete.
+struct ImGuiAppNodePort
+{
+  int              Id;          // from ImGuiAppGraph::NextId; == imnodes attribute id
+  ImGuiAppPortKind Kind;
+  char             Name[IM_LABEL_SIZE];
+  ImGuiID          DataTypeId;  // ImGuiType<PersistData>::ID for DataOut/DataIn (the data-flow key); 0 otherwise
+
+  ImGuiAppNodePort() { Id = 0; Kind = ImGuiAppPortKind_DataOut; Name[0] = 0; DataTypeId = 0; }
+};
+
+// One node in the authored graph. Embeds ImGuiAppNodeDraft so the existing rename/field-edit/codegen
+// helpers apply verbatim and a legacy "[Draft]" maps 1:1 to a Control node. Most fields are kind-specific.
+struct ImGuiAppNode
+{
+  int               Id;            // from NextId; == imnodes node id
+  ImGuiAppNodeKind  Kind;
+  ImGuiAppNodeDraft Draft;         // Draft.Name is the node label; PersistFields/TempFields used by Control
+  bool              IsBuiltin;     // true: backed by a compiled C++ type (palette), not drafted
+  char              TypeName[IM_LABEL_SIZE];      // C++ type to Push<> (builtin window/sidebar/layer/control)
+  char              DataTypeName[IM_LABEL_SIZE];  // builtin control PersistData type name; empty => "<Name>Data"
+  ImGuiAppLayerType LayerType;     // Layer nodes only
+  bool              HasInitialPlacement;          // Window/Sidebar first-use placement
+  ImVec2            InitialPos;
+  ImVec2            InitialSize;
+  ImGuiDir          DockDir;       // Sidebar dock direction
+  float             DockSize;      // Sidebar size
+  ImGuiWindowFlags  Flags;         // Window/Sidebar flags
+  ImVec2            GridPos;        // persisted canvas position
+  bool              HasGridPos;
+  bool              _NeedsPlace;    // apply GridPos to imnodes before the next BeginNode
+  int               BodyAttrId;     // dedicated non-port static-attribute id for the node body
+  bool              IsLive;         // mirrored from a running app object (read-only)
+  bool              IsPromoted;     // design control whose emitted data type matches a live node (transient)
+  ImGuiID           LiveKey;        // stable upsert key for a live node (so its position survives re-mirroring)
+  ImVector<ImGuiAppNodePort> Ports;
+
+  ImGuiAppNode()
+  {
+    Id = 0; Kind = ImGuiAppNodeKind_Control; IsBuiltin = false; TypeName[0] = 0; DataTypeName[0] = 0;
+    LayerType = ImGuiAppLayerType_Task; HasInitialPlacement = false; InitialPos = ImVec2(0.0f, 0.0f);
+    InitialSize = ImVec2(0.0f, 0.0f); DockDir = ImGuiDir_Down; DockSize = 0.0f; Flags = ImGuiWindowFlags_None;
+    GridPos = ImVec2(0.0f, 0.0f); HasGridPos = false; _NeedsPlace = false; BodyAttrId = 0;
+    IsLive = false; IsPromoted = false; LiveKey = 0;
+  }
+};
+
+// Optional per-data-edge field assignment: emits one "data->Dst = dep->Src;" line in OnUpdate. Kept off the
+// link (an ImVector member would make ImGuiAppNodeLink a non-aggregate and break brace-init); keyed by LinkId.
+struct ImGuiAppFieldBinding
+{
+  int  LinkId;
+  char DstField[IM_LABEL_SIZE];
+  char SrcField[IM_LABEL_SIZE];
+
+  ImGuiAppFieldBinding() { LinkId = 0; DstField[0] = 0; SrcField[0] = 0; }
+};
+
+// The whole authored graph: nodes, typed links, field bindings, and one monotonic id allocator shared by
+// every node/port/body-attr/link so ids are globally unique and never reused.
+struct ImGuiAppGraph
+{
+  ImVector<ImGuiAppNode>         Nodes;
+  ImVector<ImGuiAppNodeLink>     Links;
+  ImVector<ImGuiAppFieldBinding> Bindings;
+  int NextId;
+  int EditingNodeId;             // node whose title is being renamed inline, or -1
+
+  ImGuiAppGraph() { NextId = 1; EditingNodeId = -1; }
+};
+
+namespace ImGui
+{
+  // Allocation / factory. AddNode/AddBuiltin push an empty node then stamp the kind's mandatory ports and a
+  // body-attr id, returning a pointer valid until the next node is added (Nodes may reallocate). Find* resolve
+  // by search, never by index. RemoveNode also sweeps incident links and orphaned bindings.
+  IMGUI_API int                 AppGraphAllocId(ImGuiAppGraph* g);
+  IMGUI_API ImGuiAppNode*       AppGraphAddNode(ImGuiAppGraph* g, ImGuiAppNodeKind kind, const char* name);
+  IMGUI_API ImGuiAppNode*       AppGraphAddBuiltin(ImGuiAppGraph* g, ImGuiAppNodeKind kind, const char* type_name, const char* data_type_name);
+  IMGUI_API void                AppGraphRemoveNode(ImGuiAppGraph* g, int node_id);
+  IMGUI_API ImGuiAppNode*       AppGraphFindNode(ImGuiAppGraph* g, int node_id);
+  IMGUI_API ImGuiAppNodePort*   AppGraphFindPort(ImGuiAppGraph* g, int port_id, ImGuiAppNode** out_owner);
+
+  // The runtime data-flow key for a node named <node_name>: ConstantHash of the sanitized "<Name>Data" the
+  // codegen emits -- equals ImGuiType<<Name>Data>::ID, so a design DataOut port shares the live storage key.
+  IMGUI_API ImGuiID             AppNodeStructTypeId(const char* node_name);
+
+  // Typed links. CanLink validates an attempted edge (kind pairing, no self/dup, no duplicate dep type, no
+  // cycle) and writes a reason to err on rejection. CaptureAppGraphLinks folds imnodes create/destroy events,
+  // refusing illegal creations; returns true if the model changed.
+  IMGUI_API bool                AppGraphCanLink(ImGuiAppGraph* g, int start_port, int end_port, char* err, int err_size);
+  IMGUI_API bool                CaptureAppGraphLinks(ImGuiAppGraph* g, char* err, int err_size);
+
+  // Per-edge field-binding editor (call inside an attribute). Lists/edits the bindings for one data link.
+  IMGUI_API void                EditAppDataEdgeBindings(ImGuiAppGraph* g, int link_id);
+
+  // Render the whole typed graph inside the current window (wraps BeginNodeEditor..EndNodeEditor). app may be
+  // null (design-only); when non-null, builtin control bodies can reflect live data.
+  IMGUI_API void                ShowAppGraphEditor(ImGuiApp* app, ImGuiAppGraph* g);
+
+  // Mirror the running app's controls into *g WITHOUT reflection: remove all prior live nodes, then add one
+  // read-only live Control node per pushed control (keyed by GetControlDataID) plus the data edges between
+  // them, and flag design control nodes whose emitted data type matches a live node. Design (non-live) nodes
+  // are untouched. Safe to call every frame.
+  IMGUI_API void                BuildAppLiveGraph(const ImGuiApp* app, ImGuiAppGraph* g);
+
+  // Scene-hierarchy / outliner panel (call inside your own child/window): a tree of the running app's
+  // composition -- Layers, Windows, Sidebars, Controls -- plus the graph's authored nodes. Clicking a graph
+  // row selects that node in the editor. *selected_node_id is caller-owned selection state (-1 = none).
+  IMGUI_API void                ShowAppGraphTree(const ImGuiApp* app, ImGuiAppGraph* g, int* selected_node_id);
+
+  // Topologically order the Control nodes by data dependency (producers before consumers). Returns false and
+  // writes err on a cycle. out_control_ids receives node ids in push order.
+  IMGUI_API bool                AppGraphTopoOrder(const ImGuiAppGraph* g, ImVector<int>* out_control_ids, char* err, int err_size);
+
+  // Whole-graph codegen: data structs + controls with derived DataDependencies (topo order) + one bring-up
+  // function pushing layers, then windows/sidebars, then controls. Appends to *out.
+  IMGUI_API void                GenerateAppGraphCode(const ImGuiAppGraph* g, ImGuiTextBuffer* out);
+
+  // Persist / restore the whole graph as imgui-style text. LoadAppGraph also ingests the legacy single/multi
+  // "[Draft]" format (each becomes a Control node). The four legacy Save/Load*Graph[Multi] functions above are
+  // unchanged. Return false on file error.
+  IMGUI_API bool                SaveAppGraph(const char* path, const ImGuiAppGraph* g);
+  IMGUI_API bool                LoadAppGraph(const char* path, ImGuiAppGraph* g);
 }

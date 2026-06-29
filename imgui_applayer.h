@@ -24,8 +24,8 @@ Index of this file:
 #include "imapp_config.h"
 
 // Version (please keep in sync if you bump it)
-#define IMGUI_APPLAYER_VERSION      "0.3.0"
-#define IMGUI_APPLAYER_VERSION_NUM  300
+#define IMGUI_APPLAYER_VERSION      "0.4.0"
+#define IMGUI_APPLAYER_VERSION_NUM  400
 
 #include <mutex>                          // std::call_once
 #include <tuple>                          // 
@@ -289,6 +289,11 @@ struct ImGuiAppSidebarBase : ImGuiAppWindowBase
 
 struct ImGuiAppControlBase : ImGuiAppItemBase
 {
+  // Live-introspection hooks: re-expose the compile-time-erased data identity so a node editor can mirror the
+  // running control graph WITHOUT reflection. Defaults inert; ImGuiAppControl<> overrides from its pack.
+  virtual ImGuiID GetControlDataID()                              const { return 0; }
+  virtual int     GetControlDependencyIDs(ImGuiID* out, int cap)  const { IM_UNUSED(out); IM_UNUSED(cap); return 0; }
+  virtual void    GetControlDataTypeName(char* out, int out_size) const { if (out && out_size > 0) out[0] = 0; }
 };
 
 template <typename PersistDataT, typename TempDataT, typename... DataDependencies>
@@ -460,6 +465,24 @@ struct ImGuiAppControl : ImGuiInterfaceAdapter<ImGuiAppControlBase, PersistDataT
 {
   using ControlDataType = PersistDataT;
   using ControlInstanceDataType = ImGuiInterfaceAdapter<ImGuiAppControlBase, PersistDataT, TempDataT, DataDependencies...>::InstanceData;
+
+  // Live-introspection overrides: the dependency ids are the per-dependency ImGuiType<>::ID values -- the same
+  // keys app->Data is keyed by -- so a mirror can resolve producers by id with no reflection.
+  virtual ImGuiID GetControlDataID() const override final { return ImGuiType<PersistDataT>::ID; }
+
+  virtual int GetControlDependencyIDs(ImGuiID* out, int cap) const override final
+  {
+    const int count = (int)(sizeof...(DataDependencies));
+    if (out == nullptr || cap <= 0)
+      return count;
+    const ImGuiID ids[] = { (ImGuiID)0, ImGuiType<DataDependencies>::ID... }; // leading 0 -> never zero-size
+    const int n = count < cap ? count : cap;
+    for (int i = 0; i < n; i++)
+      out[i] = ids[i + 1];
+    return n;
+  }
+
+  virtual void GetControlDataTypeName(char* out, int out_size) const override final { GenerateLabel<PersistDataT>(out, (size_t)out_size); }
 };
 
 template <typename T>
