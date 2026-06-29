@@ -272,7 +272,7 @@ namespace
     char            WriteMsg[64];     // transient "wrote header" confirmation
     char            GraphPath[256];
     char            HeaderPath[256];
-    const ImGuiApp* Mirror;           // app reflected into the live graph (set after push; see ShowAppLayerDemo)
+    ImGuiApp*       Mirror;           // app reflected into the live graph (set after push; see ShowAppLayerDemo)
   };
   struct GraphDocTempData {};
 
@@ -318,7 +318,12 @@ namespace
     ImGui::SameLine(0.0f, em * 0.6f);
   }
 
-  struct ToolbarData {};
+  // Each panel caches the shared doc's true (non-const) pointer from app storage in OnInitialize -- the
+  // BreathingControlDemo::data->app convention. No control receives the doc as a const dependency to cast away.
+  struct ToolbarData
+  {
+    GraphDocData* Doc;
+  };
   // The button bar's discrete actions are captured here in OnRender and applied in OnUpdate -- TempData IS the
   // edit-intent bus (so file IO and geometry changes leave the render path entirely).
   struct ToolbarTempData
@@ -330,22 +335,26 @@ namespace
     bool SetShowLive;   // "Show live mirror" checkbox changed this frame
     bool ShowLive;      // its captured value
   };
-  struct ToolbarControl : ImGuiAppControl<ToolbarData, ToolbarTempData, GraphDocData>
+  struct ToolbarControl : ImGuiAppControl<ToolbarData, ToolbarTempData>
   {
-    virtual void OnUpdate(float dt, ToolbarData*, const ToolbarTempData* in, const ToolbarTempData*, const GraphDocData* cdoc) const override final
+    virtual void OnInitialize(ImGuiApp* app, ToolbarData* data) const override final
+    {
+      data->Doc = GetGraphDoc(app);
+    }
+
+    virtual void OnUpdate(float dt, ToolbarData* data, const ToolbarTempData* temp_data, const ToolbarTempData* last_temp_data) const override final
     {
       IM_UNUSED(dt);
-      GraphDocData* doc = const_cast<GraphDocData*>(cdoc);   // the doc is a read-only dependency; mutating it is the
-                                                             // documented interim escape, done here in the logic phase
-      if (in->Save)
+      GraphDocData* doc = data->Doc;
+      if (temp_data->Save)
       {
         ImGui::SaveAppGraph(doc->GraphPath, &doc->Graph);
       }
-      if (in->Load)
+      if (temp_data->Load)
       {
         ImGui::LoadAppGraph(doc->GraphPath, &doc->Graph);
       }
-      if (in->WriteHeader)
+      if (temp_data->WriteHeader)
       {
         ImGuiTextBuffer full;
         ImGui::GenerateAppGraphCode(&doc->Graph, &full);
@@ -356,18 +365,19 @@ namespace
           ImFormatString(doc->WriteMsg, IM_ARRAYSIZE(doc->WriteMsg), "wrote %s", doc->HeaderPath);
         }
       }
-      if (in->ToggleCode)
+      if (temp_data->ToggleCode)
       {
         doc->CodeH = (doc->CodeH > 0.0f) ? 0.0f : ImGui::GetFontSize() * 12.0f;
       }
-      if (in->SetShowLive)
+      if (temp_data->SetShowLive)
       {
-        doc->ShowLive = in->ShowLive;
+        doc->ShowLive = temp_data->ShowLive;
       }
     }
 
-    virtual void OnRender(const ToolbarData*, ToolbarTempData* out, const GraphDocData* doc) const override final
+    virtual void OnRender(const ToolbarData* data, ToolbarTempData* temp_data) const override final
     {
+      GraphDocData*     doc       = data->Doc;
       const float       em        = ImGui::GetFontSize();
       const ImGuiStyle& style     = ImGui::GetStyle();
       const bool        code_open = doc->CodeH > 0.0f;
@@ -380,29 +390,29 @@ namespace
         }
         ImGui::SetItemTooltip("Add a node (Layer / Window / Sidebar / Control) to the canvas");
         // The Add-node palette is a multi-level ImGui popup menu (builtins, layer-type dedup) -- genuinely bound to
-        // submission, so it stays a localized, documented graph write rather than a captured intent.
+        // submission, so it writes the graph directly through the cached doc pointer.
         if (ImGui::BeginPopup("##addnode"))
         {
-          ShowNodePalette(const_cast<ImGuiAppGraph*>(&doc->Graph));
+          ShowNodePalette(&doc->Graph);
           ImGui::EndPopup();
         }
 
         EditorToolSep(em);
-        out->Save = ImGui::Button("Save");
+        temp_data->Save = ImGui::Button("Save");
         ImGui::SetItemTooltip("Save graph -> %s", doc->GraphPath);
         ImGui::SameLine();
-        out->Load = ImGui::Button("Load");
+        temp_data->Load = ImGui::Button("Load");
         ImGui::SetItemTooltip("Load graph <- %s", doc->GraphPath);
 
         EditorToolSep(em);
-        out->WriteHeader = ImGui::Button("Write .h");
+        temp_data->WriteHeader = ImGui::Button("Write .h");
         ImGui::SetItemTooltip("Write whole-graph C++ -> %s", doc->HeaderPath);
         ImGui::SameLine();
         if (code_open)
         {
           ImGui::PushStyleColor(ImGuiCol_Button, style.Colors[ImGuiCol_ButtonActive]);
         }
-        out->ToggleCode = ImGui::Button(code_open ? "Code v" : "Code >");
+        temp_data->ToggleCode = ImGui::Button(code_open ? "Code v" : "Code >");
         if (code_open)
         {
           ImGui::PopStyleColor();
@@ -410,8 +420,8 @@ namespace
         ImGui::SetItemTooltip("Show / hide the generated-code inspector");
 
         EditorToolSep(em);
-        out->SetShowLive = ImGui::Checkbox("Show live mirror", &show_live);
-        out->ShowLive    = show_live;
+        temp_data->SetShowLive = ImGui::Checkbox("Show live mirror", &show_live);
+        temp_data->ShowLive    = show_live;
         ImGui::SetItemTooltip("Hide/show read-only nodes mirrored from the running app. Hiding never deletes your design.");
       }
       ImGui::EndChild();
@@ -422,6 +432,7 @@ namespace
   // selects the pill color (0 disabled, 1 green, 2 amber, 3 red).
   struct StatusStripData
   {
+    GraphDocData* Doc;
     char GraphMsg[180];                 // "graph ok" or "cycle: ..."
     int  GraphLevel;                    // 1 ok, 3 cycle
     char CountMsg[96];                  // "design N  live N  promoted N"
@@ -431,11 +442,17 @@ namespace
     char Breadcrumb[IM_LABEL_SIZE * 2]; // selection breadcrumb
   };
   struct StatusStripTempData {};   // empty by design: the strip is read-only display, it captures no input
-  struct StatusStripControl : ImGuiAppControl<StatusStripData, StatusStripTempData, GraphDocData>
+  struct StatusStripControl : ImGuiAppControl<StatusStripData, StatusStripTempData>
   {
-    virtual void OnUpdate(float dt, StatusStripData* data, const StatusStripTempData*, const StatusStripTempData*, const GraphDocData* doc) const override final
+    virtual void OnInitialize(ImGuiApp* app, StatusStripData* data) const override final
+    {
+      data->Doc = GetGraphDoc(app);
+    }
+
+    virtual void OnUpdate(float dt, StatusStripData* data, const StatusStripTempData*, const StatusStripTempData*) const override final
     {
       IM_UNUSED(dt);
+      const GraphDocData* doc = data->Doc;
 
       // The order vector is throwaway scratch for the topo call; only success/failure feeds the strip.
       ImVector<int> order;
@@ -491,9 +508,9 @@ namespace
       ImGui::AppGraphSelectionBreadcrumb(&doc->Graph, doc->Selection, data->Breadcrumb, IM_ARRAYSIZE(data->Breadcrumb));
     }
 
-    virtual void OnRender(const StatusStripData* data, StatusStripTempData*, const GraphDocData*) const override final
+    virtual void OnRender(const StatusStripData* data, StatusStripTempData*) const override final
     {
-      const float em = ImGui::GetFontSize();
+      const float       em    = ImGui::GetFontSize();
       const ImGuiStyle& style = ImGui::GetStyle();
       auto pill = [&](const char* text, int level)
       {
@@ -525,6 +542,7 @@ namespace
   // timer_text pattern -- derived in OnUpdate, drawn from const data in OnRender).
   struct EditorBodyData
   {
+    GraphDocData*   Doc;                     // shared doc, cached non-const in OnInitialize
     bool            TreeDragging;            // tree splitter drag FSM (advanced only in OnUpdate)
     float           TreeDragDX;              // grab offset within the grip, captured at drag start
     ImGuiTextBuffer CodeText;                // generated C++ for the selected node
@@ -549,45 +567,49 @@ namespace
     bool  SelectionChanged;    // tree/canvas changed the selection this frame
     int   Selection;           // the new selection
   };
-  struct EditorBodyControl : ImGuiAppControl<EditorBodyData, EditorBodyTempData, GraphDocData>
+  struct EditorBodyControl : ImGuiAppControl<EditorBodyData, EditorBodyTempData>
   {
-    virtual void OnUpdate(float dt, EditorBodyData* data, const EditorBodyTempData* in, const EditorBodyTempData*, const GraphDocData* cdoc) const override final
+    virtual void OnInitialize(ImGuiApp* app, EditorBodyData* data) const override final
+    {
+      data->Doc = GetGraphDoc(app);
+    }
+
+    virtual void OnUpdate(float dt, EditorBodyData* data, const EditorBodyTempData* temp_data, const EditorBodyTempData* last_temp_data) const override final
     {
       IM_UNUSED(dt);
-      GraphDocData* doc = const_cast<GraphDocData*>(cdoc);   // the doc is a read-only dependency; mutating it is the
-                                                             // documented interim escape, done here in the logic phase
+      GraphDocData* doc = data->Doc;
 
       // Tree splitter FSM, driven entirely by input captured last render.
-      if (in->TreeGripActivated)
+      if (temp_data->TreeGripActivated)
       {
         data->TreeDragging = true;
-        data->TreeDragDX = in->MouseX - in->TreeGripMinX;
+        data->TreeDragDX = temp_data->MouseX - temp_data->TreeGripMinX;
       }
       if (data->TreeDragging)
       {
-        if (!in->MouseLeftDown)
+        if (!temp_data->MouseLeftDown)
         {
           data->TreeDragging = false;
         }
         else
         {
-          doc->TreeW = in->MouseX - data->TreeDragDX - in->TreeOriginX;
+          doc->TreeW = temp_data->MouseX - data->TreeDragDX - temp_data->TreeOriginX;
         }
       }
 
       // Code splitter: drag up grows the panel; release tiny snaps it closed.
-      if (in->CodeGripActive)
+      if (temp_data->CodeGripActive)
       {
-        doc->CodeH = ImClamp(in->CodeResolved - in->MouseDY, 0.0f, in->CodeMax);
+        doc->CodeH = ImClamp(temp_data->CodeResolved - temp_data->MouseDY, 0.0f, temp_data->CodeMax);
       }
-      else if (in->CodeSnapClosed)
+      else if (temp_data->CodeSnapClosed)
       {
         doc->CodeH = 0.0f;
       }
 
-      if (in->SelectionChanged)
+      if (temp_data->SelectionChanged)
       {
-        doc->Selection = in->Selection;
+        doc->Selection = temp_data->Selection;
       }
 
       // Regenerate the inspector text for the current selection while the panel is open.
@@ -605,15 +627,15 @@ namespace
       }
     }
 
-    virtual void OnRender(const EditorBodyData* data, EditorBodyTempData* out, const GraphDocData* doc) const override final
+    virtual void OnRender(const EditorBodyData* data, EditorBodyTempData* temp_data) const override final
     {
+      GraphDocData* doc = data->Doc;
       if (doc->Mirror == nullptr)                            // tree + canvas mirror the example app
       {
         return;
       }
-      // Casts: viewer APIs take non-const pointers; the use here is read-only.
-      ImGuiApp*      app   = const_cast<ImGuiApp*>(doc->Mirror);
-      ImGuiAppGraph* graph = const_cast<ImGuiAppGraph*>(&doc->Graph);
+      ImGuiApp*      app   = doc->Mirror;                    // non-const: the viewer/canvas APIs edit through it
+      ImGuiAppGraph* graph = &doc->Graph;
 
       // All layout is local + display-only (TreeW == 0 -> default); nothing is written to the doc from OnRender.
       const float    em            = ImGui::GetFontSize();
@@ -642,11 +664,11 @@ namespace
       // Tree splitter: record raw input; the drag is resolved in OnUpdate. Cursor is a pure visual.
       ImGui::SameLine(0.0f, 0.0f);
       ImGui::InvisibleButton("##tsplit", ImVec2(tree_grip, body.y));
-      out->TreeGripActivated = ImGui::IsItemActivated();
-      out->MouseLeftDown     = ImGui::IsMouseDown(ImGuiMouseButton_Left);
-      out->MouseX            = io.MousePos.x;
-      out->TreeGripMinX      = ImGui::GetItemRectMin().x;
-      out->TreeOriginX       = tree_origin_x;
+      temp_data->TreeGripActivated = ImGui::IsItemActivated();
+      temp_data->MouseLeftDown     = ImGui::IsMouseDown(ImGuiMouseButton_Left);
+      temp_data->MouseX            = io.MousePos.x;
+      temp_data->TreeGripMinX      = ImGui::GetItemRectMin().x;
+      temp_data->TreeOriginX       = tree_origin_x;
       if (data->TreeDragging || ImGui::IsItemHovered())
       {
         ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
@@ -668,12 +690,12 @@ namespace
         {
           // Code splitter: record raw input only.
           ImGui::InvisibleButton("##hsplit", ImVec2(col_w, code_grip));
-          out->CodeGripActive = ImGui::IsItemActive();
-          out->CodeResolved   = code_h;
-          out->CodeMax        = code_max;
-          out->MouseDY        = io.MouseDelta.y;
-          out->CodeSnapClosed = !out->CodeGripActive && code_h < em * 4.0f;
-          if (out->CodeGripActive || ImGui::IsItemHovered())
+          temp_data->CodeGripActive = ImGui::IsItemActive();
+          temp_data->CodeResolved   = code_h;
+          temp_data->CodeMax        = code_max;
+          temp_data->MouseDY        = io.MouseDelta.y;
+          temp_data->CodeSnapClosed = !temp_data->CodeGripActive && code_h < em * 4.0f;
+          if (temp_data->CodeGripActive || ImGui::IsItemHovered())
           {
             ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
           }
@@ -726,8 +748,8 @@ namespace
       ImGui::EndChild();
 
       // Record the selection change for OnUpdate to apply (the tree/canvas widgets edited the local copy).
-      out->SelectionChanged = (selection != doc->Selection);
-      out->Selection = selection;
+      temp_data->SelectionChanged = (selection != doc->Selection);
+      temp_data->Selection = selection;
     }
   };
 
@@ -739,10 +761,9 @@ namespace
     virtual void OnRender(const ImGuiApp*) const override final {}
   };
 
-  // The demo's own control panel, dogfooded as a framework window+control rather than a pile of function statics:
-  // the example toggles and their "applied" bookkeeping live in PersistData. ShowAppLayerDemo reads these flags to
-  // compose the mirrored example app. The MenuItems are ImGui-bound writes (MenuItem takes a bool*), so the menu is
-  // the one render-time mutation here -- the same category as the Show-live checkbox.
+  // The demo's own control panel, dogfooded as a framework window+control rather than a pile of function statics.
+  // The toggle values + their "applied" bookkeeping live in PersistData; OnRender copies them into locals for the
+  // ImGui-bound MenuItems, then records the result into TempData; OnUpdate writes it back (RandomTime's pattern).
   struct DemoMenuData
   {
     bool ShowBaseWindow;
@@ -755,25 +776,46 @@ namespace
     bool AppliedRandomTime;
     bool AppliedBreathing;
   };
-  struct DemoMenuTempData {};
+  struct DemoMenuTempData
+  {
+    bool ShowBaseWindow;
+    bool ShowStatusBar;
+    bool ShowRandomTime;
+    bool ShowBreathing;
+    bool ShowMetrics;
+  };
   struct DemoMenuControl : ImGuiAppControl<DemoMenuData, DemoMenuTempData>
   {
-    virtual void OnRender(const DemoMenuData* cdata, DemoMenuTempData*) const override final
+    virtual void OnUpdate(float dt, DemoMenuData* data, const DemoMenuTempData* temp_data, const DemoMenuTempData* last_temp_data) const override final
     {
-      DemoMenuData* data = const_cast<DemoMenuData*>(cdata);
+      IM_UNUSED(dt);
+      data->ShowBaseWindow = temp_data->ShowBaseWindow;
+      data->ShowStatusBar  = temp_data->ShowStatusBar;
+      data->ShowRandomTime = temp_data->ShowRandomTime;
+      data->ShowBreathing  = temp_data->ShowBreathing;
+      data->ShowMetrics    = temp_data->ShowMetrics;
+    }
+
+    virtual void OnRender(const DemoMenuData* data, DemoMenuTempData* temp_data) const override final
+    {
+      bool show_base    = data->ShowBaseWindow;
+      bool show_status  = data->ShowStatusBar;
+      bool show_random  = data->ShowRandomTime;
+      bool show_breathe = data->ShowBreathing;
+      bool show_metrics = data->ShowMetrics;
       if (ImGui::BeginMenuBar())
       {
         if (ImGui::BeginMenu("Examples"))
         {
-          ImGui::MenuItem("Base window",          nullptr, &data->ShowBaseWindow);
-          ImGui::MenuItem("Status bar",           nullptr, &data->ShowStatusBar);
-          ImGui::MenuItem("Random Time control",  nullptr, &data->ShowRandomTime);
-          ImGui::MenuItem("Breathing control",    nullptr, &data->ShowBreathing);
+          ImGui::MenuItem("Base window",          nullptr, &show_base);
+          ImGui::MenuItem("Status bar",           nullptr, &show_status);
+          ImGui::MenuItem("Random Time control",  nullptr, &show_random);
+          ImGui::MenuItem("Breathing control",    nullptr, &show_breathe);
           ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("Tools"))
         {
-          ImGui::MenuItem("Metrics/Debugger", nullptr, &data->ShowMetrics);
+          ImGui::MenuItem("Metrics/Debugger", nullptr, &show_metrics);
           ImGui::EndMenu();
         }
         ImGui::EndMenuBar();
@@ -789,6 +831,12 @@ namespace
       {
         ImGui::TextDisabled("See Tools > Metrics/Debugger -> status strip for composition, lifecycle and FPS.");
       }
+
+      temp_data->ShowBaseWindow = show_base;
+      temp_data->ShowStatusBar  = show_status;
+      temp_data->ShowRandomTime = show_random;
+      temp_data->ShowBreathing  = show_breathe;
+      temp_data->ShowMetrics    = show_metrics;
     }
   };
 
