@@ -287,12 +287,12 @@ namespace
     virtual void OnInitialize(ImGuiApp* app, GraphDocData* data) const override final
     {
       IM_UNUSED(app);
-      data->Selection = -1;
-      data->ShowLive  = true;
-      data->TreeW     = 0.0f;            // 0 -> EditorBody picks a default on first layout
-      data->CodeH     = 0.0f;            // collapsed
+      data->Selection   = -1;
+      data->ShowLive    = true;
+      data->TreeW       = 0.0f;          // 0 -> EditorBody picks a default on first layout
+      data->CodeH       = 0.0f;          // collapsed
       data->WriteMsg[0] = 0;
-      data->Mirror    = nullptr;         // set after push by ShowAppLayerDemo
+      data->Mirror      = nullptr;       // set after push by ShowAppLayerDemo
       ImStrncpy(data->GraphPath,  "imguix_node_graph.txt",      sizeof(data->GraphPath));
       ImStrncpy(data->HeaderPath, "imguix_generated_control.h", sizeof(data->HeaderPath));
       if (data->Graph.Nodes.empty())
@@ -368,8 +368,10 @@ namespace
 
     virtual void OnRender(const ToolbarData*, ToolbarTempData* out, const GraphDocData* doc) const override final
     {
-      const float em = ImGui::GetFontSize();
-      const ImGuiStyle& style = ImGui::GetStyle();
+      const float       em        = ImGui::GetFontSize();
+      const ImGuiStyle& style     = ImGui::GetStyle();
+      const bool        code_open = doc->CodeH > 0.0f;
+      bool              show_live = doc->ShowLive;
       if (ImGui::BeginChild("##Toolbar", ImVec2(0.0f, 0.0f), ImGuiChildFlags_FrameStyle | ImGuiChildFlags_AutoResizeY))
       {
         if (ImGui::Button("+ Add node"))
@@ -396,7 +398,6 @@ namespace
         out->WriteHeader = ImGui::Button("Write .h");
         ImGui::SetItemTooltip("Write whole-graph C++ -> %s", doc->HeaderPath);
         ImGui::SameLine();
-        const bool code_open = doc->CodeH > 0.0f;
         if (code_open)
         {
           ImGui::PushStyleColor(ImGuiCol_Button, style.Colors[ImGuiCol_ButtonActive]);
@@ -409,7 +410,6 @@ namespace
         ImGui::SetItemTooltip("Show / hide the generated-code inspector");
 
         EditorToolSep(em);
-        bool show_live = doc->ShowLive;
         out->SetShowLive = ImGui::Checkbox("Show live mirror", &show_live);
         out->ShowLive    = show_live;
         ImGui::SetItemTooltip("Hide/show read-only nodes mirrored from the running app. Hiding never deletes your design.");
@@ -436,9 +436,14 @@ namespace
     virtual void OnUpdate(float dt, StatusStripData* data, const StatusStripTempData*, const StatusStripTempData*, const GraphDocData* doc) const override final
     {
       IM_UNUSED(dt);
-      // Topo state. The order vector is throwaway scratch for the call; only success/failure feeds the strip.
+
+      // The order vector is throwaway scratch for the topo call; only success/failure feeds the strip.
       ImVector<int> order;
-      char err[160] = "";
+      char          err[160] = "";
+      int           nd       = 0;
+      int           nl       = 0;
+      int           np       = 0;
+
       if (ImGui::AppGraphTopoOrder(&doc->Graph, &order, err, IM_ARRAYSIZE(err)))
       {
         ImStrncpy(data->GraphMsg, "graph ok", sizeof(data->GraphMsg));
@@ -450,9 +455,6 @@ namespace
         data->GraphLevel = 3;
       }
 
-      int nd = 0;
-      int nl = 0;
-      int np = 0;
       for (int i = 0; i < doc->Graph.Nodes.Size; i++)
       {
         const ImGuiAppNode* n = &doc->Graph.Nodes.Data[i];
@@ -609,22 +611,26 @@ namespace
       {
         return;
       }
-      ImGuiApp*      app   = const_cast<ImGuiApp*>(doc->Mirror);      // viewer APIs take non-const; use is read-only
+      // Casts: viewer APIs take non-const pointers; the use here is read-only.
+      ImGuiApp*      app   = const_cast<ImGuiApp*>(doc->Mirror);
       ImGuiAppGraph* graph = const_cast<ImGuiAppGraph*>(&doc->Graph);
 
-      const float em = ImGui::GetFontSize();
-      const ImGuiIO& io = ImGui::GetIO();
-      const ImVec2 body = ImGui::GetContentRegionAvail();
-      const float tree_origin_x = ImGui::GetCursorScreenPos().x;
-      const float tree_grip = em * 0.5f;
-      const float min_canvas_w = em * 16.0f;
-
-      // Display-only fit of the persisted TreeW (0 -> default). Local floats; nothing is written to the doc here.
-      float tree_w = (doc->TreeW > 0.0f) ? doc->TreeW : em * 16.0f;
-      tree_w = ImClamp(tree_w, em * 9.0f, ImMax(em * 9.0f, body.x - tree_grip - min_canvas_w));
-      const float right_w = ImMax(0.0f, body.x - tree_w - tree_grip);
-
-      int selection = doc->Selection;
+      // All layout is local + display-only (TreeW == 0 -> default); nothing is written to the doc from OnRender.
+      const float    em            = ImGui::GetFontSize();
+      const ImGuiIO& io            = ImGui::GetIO();
+      const ImVec2   body          = ImGui::GetContentRegionAvail();
+      const float    tree_origin_x = ImGui::GetCursorScreenPos().x;
+      const float    tree_grip     = em * 0.5f;
+      const float    min_canvas_w  = em * 16.0f;
+      const float    min_canvas_h  = em * 8.0f;
+      const float    code_grip     = (doc->CodeH > 0.0f) ? em * 0.5f : 0.0f;
+      const float    code_max      = ImMax(0.0f, body.y - min_canvas_h - code_grip);
+      const float    code_h        = ImClamp(doc->CodeH, 0.0f, code_max);
+      const float    canvas_h      = ImMax(0.0f, body.y - code_h - code_grip);
+      const float    tree_w        = ImClamp((doc->TreeW > 0.0f) ? doc->TreeW : em * 16.0f, em * 9.0f, ImMax(em * 9.0f, body.x - tree_grip - min_canvas_w));
+      const float    right_w       = ImMax(0.0f, body.x - tree_w - tree_grip);
+      int            selection     = doc->Selection;
+      float          col_w         = 0.0f;     // assigned once inside ##Right (needs that child's content region)
 
       // Left: tree sidebar (full height).
       if (ImGui::BeginChild("##Tree", ImVec2(tree_w, 0.0f), ImGuiChildFlags_Borders))
@@ -650,12 +656,7 @@ namespace
       // Right column: node graph canvas on top, code inspector on the bottom split.
       if (ImGui::BeginChild("##Right", ImVec2(right_w, 0.0f)))
       {
-        const float col_w = ImGui::GetContentRegionAvail().x;
-        const float code_grip = (doc->CodeH > 0.0f) ? em * 0.5f : 0.0f;
-        const float min_canvas_h = em * 8.0f;
-        const float code_max = ImMax(0.0f, body.y - min_canvas_h - code_grip);
-        const float code_h = ImClamp(doc->CodeH, 0.0f, code_max);
-        const float canvas_h = ImMax(0.0f, body.y - code_h - code_grip);
+        col_w = ImGui::GetContentRegionAvail().x;
 
         if (ImGui::BeginChild("##NodeGraph", ImVec2(col_w, canvas_h), ImGuiChildFlags_Borders))
         {
@@ -856,7 +857,7 @@ namespace ImGui
 
       ImGuiAppWindowBase* panel   = editor_app.Windows[0];
       ImGuiAppWindowBase* metrics = editor_app.Windows[1];
-      DemoMenuData* st = GetDemoMenu(&editor_app);
+      DemoMenuData*       st      = GetDemoMenu(&editor_app);
 
       // Drive the framework windows' Open from the external/menu flags, tick the editor app, then read the X
       // buttons back out. The menu (a control on `panel`) toggles st->* during RenderApp.
