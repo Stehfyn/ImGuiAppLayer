@@ -347,13 +347,15 @@ void ImGuiAppWindowLayer::OnRender(const ImGuiApp* app) const
       {
         window->Window = ImGui::GetCurrentWindow();
         window->OnRender(app);
+
+        // Window-hosted controls render INSIDE the host window (they submit child regions, not their own
+        // Begin/End). This is what distinguishes a hosted control from an app-level control (which owns a window).
+        for (auto& control : window->Controls)
+          control->OnRender(app);
       }
       ImGui::End();
 
       window->OnStylePop(app);
-
-      for (auto& control : window->Controls)
-        control->OnRender(app);
     }
 
     for (auto& control : app->Controls)

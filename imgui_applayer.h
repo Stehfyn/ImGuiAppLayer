@@ -237,13 +237,18 @@ namespace ImGui
   IMGUI_API inline void PushAppControl(ImGuiApp* app);
   IMGUI_API inline void PopAppControl(ImGuiApp* app);
 
-  //template <typename T>
-  //IMGUI_API inline void PushWindowControl(ImGuiApp* app, ImGuiAppWindowBase* window);
+  template <typename T>
+  IMGUI_API inline void PushWindowControl(ImGuiApp* app, ImGuiAppWindowBase* window);
 
   template <typename T>
   IMGUI_API inline void PushSidebarControl(ImGuiApp* app, ImGuiAppSidebarBase* sidebar);
 
   IMGUI_API void ShowAppLayerDemo(bool* p_open = nullptr);
+
+  // Monospace font for the dogfooded editor's generated-code inspector. Space-padded column alignment (e.g. the
+  // generated AppCommand enum) only lines up in a fixed-width font; the app's UI font is proportional. The host
+  // loads a mono face (e.g. Consolas) at font-init time and registers it here; null leaves the inspector on the UI font.
+  IMGUI_API void SetAppCodeFont(ImFont* font);
 }
 
 struct ImGuiAppLayerBase : ImGuiInterface
@@ -645,32 +650,32 @@ namespace ImGui
       IM_DELETE(control);
   }
 
-  //template <typename T>
-  //IMGUI_API void PushWindowControl(ImGuiApp* app, ImGuiAppWindowBase* window)
-  //{
-  //    ImGuiID id;
-  //    T* control;
-  //    typename T::ControlInstanceDataType* instance_data;
-  //
-  //    IM_ASSERT(app);
-  //
-  //    // Use the control's data type hash for instance data storage/retrieval (so other controls which depend on instance_data->ControlData may access it)
-  //    id = ImGuiType<typename T::ControlDataType>::ID;
-  //
-  //    // Ensure we are not pushing a duplicate instance of this control data type
-  //    instance_data = static_cast<decltype(instance_data)>(app->Data.GetVoidPtr(id));
-  //    IM_ASSERT(nullptr == instance_data);
-  //
-  //    control = IM_NEW(T)();
-  //    IM_ASSERT(control);
-  //
-  //    instance_data = IM_NEW(typename T::ControlInstanceDataType)();
-  //    IM_ASSERT(instance_data);
-  //
-  //    app->Data.SetVoidPtr(id, instance_data);
-  //    window->Controls.push_back(control);
-  //    window->Controls.back()->OnInitialize(app);
-  //}
+  // Host a control INSIDE a window: its instance data is registered in app->Data like any control, but it is
+  // appended to window->Controls so the WindowLayer renders it between the host window's Begin/End (a
+  // window-hosted control submits into the current window, e.g. via BeginChild, rather than its own Begin).
+  template <typename T>
+  IMGUI_API inline void PushWindowControl(ImGuiApp* app, ImGuiAppWindowBase* window)
+  {
+      IM_ASSERT(app && window);
+
+      // Use the control's data type hash for instance data storage/retrieval (so other controls which depend on instance_data->ControlData may access it)
+      ImGuiID id = ImGuiType<typename T::ControlDataType>::ID;
+
+      // Ensure we are not pushing a duplicate instance of this control data type
+      typename T::ControlInstanceDataType* instance_data = static_cast<typename T::ControlInstanceDataType*>(app->Data.GetVoidPtr(id));
+      IM_ASSERT(nullptr == instance_data);
+
+      T* control = IM_NEW(T)();
+      IM_ASSERT(control);
+
+      instance_data = IM_NEW(typename T::ControlInstanceDataType)();
+      IM_ASSERT(instance_data);
+
+      app->Data.SetVoidPtr(id, instance_data);
+      RegisterAppStorage(app, id, instance_data, DestroyAppStorageValue<typename T::ControlInstanceDataType>);
+      window->Controls.push_back(control);
+      window->Controls.back()->OnInitialize(app);
+  }
 
   template <typename T>
   IMGUI_API inline void PushSidebarControl(ImGuiApp* app, ImGuiAppSidebarBase* sidebar)

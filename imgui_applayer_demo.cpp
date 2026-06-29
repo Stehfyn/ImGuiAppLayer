@@ -16,6 +16,9 @@
 
 namespace
 {
+  // Monospace font for the generated-code inspector (set via ImGui::SetAppCodeFont). Null -> UI font.
+  static ImFont* g_AppCodeFont = nullptr;
+
   // Encourage "pure" design, such that a control is "agnostic to the data passing through it."
   static void RenderTextT(const char* text, ImVec2 text_size, ImVec2 pos, ImVec2 avail, float t_value)
   {
@@ -243,400 +246,641 @@ namespace
     if (ImGui::MenuItem("Window"))  ImGui::AppGraphAddNode(graph, ImGuiAppNodeKind_Window,  "Window");
     if (ImGui::MenuItem("Sidebar")) ImGui::AppGraphAddNode(graph, ImGuiAppNodeKind_Sidebar, "Sidebar");
   }
+
+  //---------------------------------------------------------------------------------------------------
+  // Dogfooded Metrics/Debugger node editor: the editor is itself an ImGuiApp object model.
+  //
+  // The graph IS the document. ONE control (GraphDocControl) owns it as PersistData and is the single
+  // writer; the panels are controls that receive `const GraphDocData*` as a typed dependency (read), and
+  // the interactive panels mutate the doc through that pointer (a localized, deliberate escape from the
+  // framework's read-only dependency rule -- the interim until an edit-intent bus lands). TempData is empty
+  // on every panel: actions apply immediately, nothing needs to survive to next frame.
+  //
+  // No ImGuiApp* is passed to OnUpdate/OnRender, so the doc stashes the app it MIRRORS (the demo's example
+  // app) in PersistData -- the Breathing-control convention (imgui_applayer_demo.cpp data->app).
+  //---------------------------------------------------------------------------------------------------
+
+  // PersistData is value-initialized by PushAppControl<>, then seeded in GraphDocControl::OnInitialize -- no
+  // member initializers here (defaults belong to OnInitialize, not the declaration).
+  struct GraphDocData
+  {
+    ImGuiAppGraph   Graph;
+    int             Selection;        // node selection shared by tree + canvas
+    bool            ShowLive;         // show vs hide (never delete) live-mirror nodes
+    float           TreeW;            // outliner width (0 -> default on first use)
+    float           CodeH;            // code-inspector height, bottom split under the canvas (0 == collapsed)
+    char            WriteMsg[64];     // transient "wrote header" confirmation
+    char            GraphPath[256];
+    char            HeaderPath[256];
+    const ImGuiApp* Mirror;           // app reflected into the live graph (set after push; see ShowAppLayerDemo)
+  };
+  struct GraphDocTempData {};
+
+  // Mutable fetch of the shared doc from an app's storage (PersistData aliases the start of InstanceData).
+  static GraphDocData* GetGraphDoc(ImGuiApp* app)
+  {
+    return static_cast<GraphDocData*>(app->Data.GetVoidPtr(ImGuiType<GraphDocData>::ID));
+  }
+
+  struct GraphDocControl : ImGuiAppControl<GraphDocData, GraphDocTempData>
+  {
+    virtual void OnInitialize(ImGuiApp* app, GraphDocData* data) const override final
+    {
+      IM_UNUSED(app);
+      data->Selection = -1;
+      data->ShowLive  = true;
+      data->TreeW     = 0.0f;            // 0 -> EditorBody picks a default on first layout
+      data->CodeH     = 0.0f;            // collapsed
+      data->WriteMsg[0] = 0;
+      data->Mirror    = nullptr;         // set after push by ShowAppLayerDemo
+      ImStrncpy(data->GraphPath,  "imguix_node_graph.txt",      sizeof(data->GraphPath));
+      ImStrncpy(data->HeaderPath, "imguix_generated_control.h", sizeof(data->HeaderPath));
+      if (data->Graph.Nodes.empty())
+      {
+        SeedAppGraph(&data->Graph);
+      }
+    }
+    virtual void OnUpdate(float dt, GraphDocData* data, const GraphDocTempData*, const GraphDocTempData*) const override final
+    {
+      IM_UNUSED(dt);
+      // Reconcile-before-report: build the live mirror first so every panel reads the reconciled graph this frame.
+      if (data->Mirror != nullptr)
+      {
+        ImGui::BuildAppLiveGraph(data->Mirror, &data->Graph);
+      }
+    }
+  };
+
+  static void EditorToolSep(float em)
+  {
+    ImGui::SameLine(0.0f, em * 0.6f);
+    ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
+    ImGui::SameLine(0.0f, em * 0.6f);
+  }
+
+  struct ToolbarData {};
+  // The button bar's discrete actions are captured here in OnRender and applied in OnUpdate -- TempData IS the
+  // edit-intent bus (so file IO and geometry changes leave the render path entirely).
+  struct ToolbarTempData
+  {
+    bool Save;
+    bool Load;
+    bool WriteHeader;
+    bool ToggleCode;
+    bool SetShowLive;   // "Show live mirror" checkbox changed this frame
+    bool ShowLive;      // its captured value
+  };
+  struct ToolbarControl : ImGuiAppControl<ToolbarData, ToolbarTempData, GraphDocData>
+  {
+    virtual void OnUpdate(float dt, ToolbarData*, const ToolbarTempData* in, const ToolbarTempData*, const GraphDocData* cdoc) const override final
+    {
+      IM_UNUSED(dt);
+      GraphDocData* doc = const_cast<GraphDocData*>(cdoc);   // the doc is a read-only dependency; mutating it is the
+                                                             // documented interim escape, done here in the logic phase
+      if (in->Save)
+      {
+        ImGui::SaveAppGraph(doc->GraphPath, &doc->Graph);
+      }
+      if (in->Load)
+      {
+        ImGui::LoadAppGraph(doc->GraphPath, &doc->Graph);
+      }
+      if (in->WriteHeader)
+      {
+        ImGuiTextBuffer full;
+        ImGui::GenerateAppGraphCode(&doc->Graph, &full);
+        if (ImFileHandle fh = ImFileOpen(doc->HeaderPath, "wt"))
+        {
+          ImFileWrite(full.c_str(), sizeof(char), (ImU64)full.size(), fh);
+          ImFileClose(fh);
+          ImFormatString(doc->WriteMsg, IM_ARRAYSIZE(doc->WriteMsg), "wrote %s", doc->HeaderPath);
+        }
+      }
+      if (in->ToggleCode)
+      {
+        doc->CodeH = (doc->CodeH > 0.0f) ? 0.0f : ImGui::GetFontSize() * 12.0f;
+      }
+      if (in->SetShowLive)
+      {
+        doc->ShowLive = in->ShowLive;
+      }
+    }
+
+    virtual void OnRender(const ToolbarData*, ToolbarTempData* out, const GraphDocData* doc) const override final
+    {
+      const float em = ImGui::GetFontSize();
+      const ImGuiStyle& style = ImGui::GetStyle();
+      if (ImGui::BeginChild("##Toolbar", ImVec2(0.0f, 0.0f), ImGuiChildFlags_FrameStyle | ImGuiChildFlags_AutoResizeY))
+      {
+        if (ImGui::Button("+ Add node"))
+        {
+          ImGui::OpenPopup("##addnode");
+        }
+        ImGui::SetItemTooltip("Add a node (Layer / Window / Sidebar / Control) to the canvas");
+        // The Add-node palette is a multi-level ImGui popup menu (builtins, layer-type dedup) -- genuinely bound to
+        // submission, so it stays a localized, documented graph write rather than a captured intent.
+        if (ImGui::BeginPopup("##addnode"))
+        {
+          ShowNodePalette(const_cast<ImGuiAppGraph*>(&doc->Graph));
+          ImGui::EndPopup();
+        }
+
+        EditorToolSep(em);
+        out->Save = ImGui::Button("Save");
+        ImGui::SetItemTooltip("Save graph -> %s", doc->GraphPath);
+        ImGui::SameLine();
+        out->Load = ImGui::Button("Load");
+        ImGui::SetItemTooltip("Load graph <- %s", doc->GraphPath);
+
+        EditorToolSep(em);
+        out->WriteHeader = ImGui::Button("Write .h");
+        ImGui::SetItemTooltip("Write whole-graph C++ -> %s", doc->HeaderPath);
+        ImGui::SameLine();
+        const bool code_open = doc->CodeH > 0.0f;
+        if (code_open)
+        {
+          ImGui::PushStyleColor(ImGuiCol_Button, style.Colors[ImGuiCol_ButtonActive]);
+        }
+        out->ToggleCode = ImGui::Button(code_open ? "Code v" : "Code >");
+        if (code_open)
+        {
+          ImGui::PopStyleColor();
+        }
+        ImGui::SetItemTooltip("Show / hide the generated-code inspector");
+
+        EditorToolSep(em);
+        bool show_live = doc->ShowLive;
+        out->SetShowLive = ImGui::Checkbox("Show live mirror", &show_live);
+        out->ShowLive    = show_live;
+        ImGui::SetItemTooltip("Hide/show read-only nodes mirrored from the running app. Hiding never deletes your design.");
+      }
+      ImGui::EndChild();
+    }
+  };
+
+  // All strip text is derived from the doc in OnUpdate and parked here; OnRender only lays out pills. `Level`
+  // selects the pill color (0 disabled, 1 green, 2 amber, 3 red).
+  struct StatusStripData
+  {
+    char GraphMsg[180];                 // "graph ok" or "cycle: ..."
+    int  GraphLevel;                    // 1 ok, 3 cycle
+    char CountMsg[96];                  // "design N  live N  promoted N"
+    bool HasMirror;                     // doc->Mirror != nullptr
+    bool MirrorInit;                    // mirror app initialized
+    char MirrorCounts[64];              // "L# W# S# C#"
+    char Breadcrumb[IM_LABEL_SIZE * 2]; // selection breadcrumb
+  };
+  struct StatusStripTempData {};   // empty by design: the strip is read-only display, it captures no input
+  struct StatusStripControl : ImGuiAppControl<StatusStripData, StatusStripTempData, GraphDocData>
+  {
+    virtual void OnUpdate(float dt, StatusStripData* data, const StatusStripTempData*, const StatusStripTempData*, const GraphDocData* doc) const override final
+    {
+      IM_UNUSED(dt);
+      // Topo state. The order vector is throwaway scratch for the call; only success/failure feeds the strip.
+      ImVector<int> order;
+      char err[160] = "";
+      if (ImGui::AppGraphTopoOrder(&doc->Graph, &order, err, IM_ARRAYSIZE(err)))
+      {
+        ImStrncpy(data->GraphMsg, "graph ok", sizeof(data->GraphMsg));
+        data->GraphLevel = 1;
+      }
+      else
+      {
+        ImFormatString(data->GraphMsg, IM_ARRAYSIZE(data->GraphMsg), "cycle: %s", err[0] ? err : "dependency cycle");
+        data->GraphLevel = 3;
+      }
+
+      int nd = 0;
+      int nl = 0;
+      int np = 0;
+      for (int i = 0; i < doc->Graph.Nodes.Size; i++)
+      {
+        const ImGuiAppNode* n = &doc->Graph.Nodes.Data[i];
+        if (n->IsLive)
+        {
+          nl++;
+        }
+        else
+        {
+          nd++;
+        }
+        if (n->IsPromoted)
+        {
+          np++;
+        }
+      }
+      if (doc->ShowLive)
+      {
+        ImFormatString(data->CountMsg, IM_ARRAYSIZE(data->CountMsg), "design %d  live %d  promoted %d", nd, nl, np);
+      }
+      else
+      {
+        ImFormatString(data->CountMsg, IM_ARRAYSIZE(data->CountMsg), "design %d", nd);
+      }
+
+      data->HasMirror = (doc->Mirror != nullptr);
+      if (data->HasMirror)
+      {
+        const ImGuiApp* a = doc->Mirror;
+        ImFormatString(data->MirrorCounts, IM_ARRAYSIZE(data->MirrorCounts), "L%d W%d S%d C%d", a->Layers.Size, a->Windows.Size, a->Sidebars.Size, a->Controls.Size);
+        data->MirrorInit = a->Initialized;
+      }
+
+      ImGui::AppGraphSelectionBreadcrumb(&doc->Graph, doc->Selection, data->Breadcrumb, IM_ARRAYSIZE(data->Breadcrumb));
+    }
+
+    virtual void OnRender(const StatusStripData* data, StatusStripTempData*, const GraphDocData*) const override final
+    {
+      const float em = ImGui::GetFontSize();
+      const ImGuiStyle& style = ImGui::GetStyle();
+      auto pill = [&](const char* text, int level)
+      {
+        const ImVec4 col[4] = { style.Colors[ImGuiCol_TextDisabled], ImVec4(0.45f,0.85f,0.45f,1.0f),
+                                ImVec4(0.90f,0.80f,0.35f,1.0f), ImVec4(0.90f,0.45f,0.45f,1.0f) };
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextColored(col[level], "%s", text);
+      };
+      if (ImGui::BeginChild("##Strip", ImVec2(0.0f, 0.0f), ImGuiChildFlags_FrameStyle | ImGuiChildFlags_AutoResizeY))
+      {
+        pill(data->GraphMsg, data->GraphLevel);
+        EditorToolSep(em);
+        pill(data->CountMsg, 0);
+        if (data->HasMirror)
+        {
+          EditorToolSep(em);
+          pill(data->MirrorCounts, 0);
+          EditorToolSep(em);
+          pill(data->MirrorInit ? "init" : "uninit", data->MirrorInit ? 1 : 0);
+        }
+        EditorToolSep(em);
+        pill(data->Breadcrumb, 0);
+      }
+      ImGui::EndChild();
+    }
+  };
+
+  // PersistData: durable state, mutated only in OnUpdate. CodeText/CodeName are the rendered output (Breathing's
+  // timer_text pattern -- derived in OnUpdate, drawn from const data in OnRender).
+  struct EditorBodyData
+  {
+    bool            TreeDragging;            // tree splitter drag FSM (advanced only in OnUpdate)
+    float           TreeDragDX;              // grab offset within the grip, captured at drag start
+    ImGuiTextBuffer CodeText;                // generated C++ for the selected node
+    bool            HasCode;                 // a node is selected and code was generated
+    char            CodeName[IM_LABEL_SIZE]; // selected node's draft name (for the panel title)
+  };
+  // TempData: raw input recorded by OnRender (the only place ImGui item geometry exists) and consumed by OnUpdate.
+  // OnRender performs no logic and mutates no state -- it just records what the user did, exactly like the demo's
+  // RandomTimeTempData::generate / BreathingControlTempData::hovered.
+  struct EditorBodyTempData
+  {
+    bool  TreeGripActivated;   // drag started on the tree grip this frame
+    bool  MouseLeftDown;       // left button held
+    float MouseX;              // mouse x (screen)
+    float TreeGripMinX;        // tree grip left edge
+    float TreeOriginX;         // body row left edge
+    bool  CodeGripActive;      // code grip held this frame
+    float CodeResolved;        // this frame's clamped code height (drag base)
+    float CodeMax;             // this frame's max code height
+    float MouseDY;             // mouse y delta while dragging the code grip
+    bool  CodeSnapClosed;      // resolved code height collapsed below threshold while idle
+    bool  SelectionChanged;    // tree/canvas changed the selection this frame
+    int   Selection;           // the new selection
+  };
+  struct EditorBodyControl : ImGuiAppControl<EditorBodyData, EditorBodyTempData, GraphDocData>
+  {
+    virtual void OnUpdate(float dt, EditorBodyData* data, const EditorBodyTempData* in, const EditorBodyTempData*, const GraphDocData* cdoc) const override final
+    {
+      IM_UNUSED(dt);
+      GraphDocData* doc = const_cast<GraphDocData*>(cdoc);   // the doc is a read-only dependency; mutating it is the
+                                                             // documented interim escape, done here in the logic phase
+
+      // Tree splitter FSM, driven entirely by input captured last render.
+      if (in->TreeGripActivated)
+      {
+        data->TreeDragging = true;
+        data->TreeDragDX = in->MouseX - in->TreeGripMinX;
+      }
+      if (data->TreeDragging)
+      {
+        if (!in->MouseLeftDown)
+        {
+          data->TreeDragging = false;
+        }
+        else
+        {
+          doc->TreeW = in->MouseX - data->TreeDragDX - in->TreeOriginX;
+        }
+      }
+
+      // Code splitter: drag up grows the panel; release tiny snaps it closed.
+      if (in->CodeGripActive)
+      {
+        doc->CodeH = ImClamp(in->CodeResolved - in->MouseDY, 0.0f, in->CodeMax);
+      }
+      else if (in->CodeSnapClosed)
+      {
+        doc->CodeH = 0.0f;
+      }
+
+      if (in->SelectionChanged)
+      {
+        doc->Selection = in->Selection;
+      }
+
+      // Regenerate the inspector text for the current selection while the panel is open.
+      data->CodeText.clear();
+      data->HasCode = false;
+      data->CodeName[0] = 0;
+      if (doc->CodeH > 0.0f && doc->Selection >= 0)
+      {
+        if (ImGuiAppNode* seln = ImGui::AppGraphFindNode(&doc->Graph, doc->Selection))
+        {
+          ImGui::GenerateAppNodeCode(&doc->Graph, seln, &data->CodeText);
+          ImStrncpy(data->CodeName, seln->Draft.Name, sizeof(data->CodeName));
+          data->HasCode = true;
+        }
+      }
+    }
+
+    virtual void OnRender(const EditorBodyData* data, EditorBodyTempData* out, const GraphDocData* doc) const override final
+    {
+      if (doc->Mirror == nullptr)                            // tree + canvas mirror the example app
+      {
+        return;
+      }
+      ImGuiApp*      app   = const_cast<ImGuiApp*>(doc->Mirror);      // viewer APIs take non-const; use is read-only
+      ImGuiAppGraph* graph = const_cast<ImGuiAppGraph*>(&doc->Graph);
+
+      const float em = ImGui::GetFontSize();
+      const ImGuiIO& io = ImGui::GetIO();
+      const ImVec2 body = ImGui::GetContentRegionAvail();
+      const float tree_origin_x = ImGui::GetCursorScreenPos().x;
+      const float tree_grip = em * 0.5f;
+      const float min_canvas_w = em * 16.0f;
+
+      // Display-only fit of the persisted TreeW (0 -> default). Local floats; nothing is written to the doc here.
+      float tree_w = (doc->TreeW > 0.0f) ? doc->TreeW : em * 16.0f;
+      tree_w = ImClamp(tree_w, em * 9.0f, ImMax(em * 9.0f, body.x - tree_grip - min_canvas_w));
+      const float right_w = ImMax(0.0f, body.x - tree_w - tree_grip);
+
+      int selection = doc->Selection;
+
+      // Left: tree sidebar (full height).
+      if (ImGui::BeginChild("##Tree", ImVec2(tree_w, 0.0f), ImGuiChildFlags_Borders))
+      {
+        ImGui::ShowAppGraphTree(app, graph, &selection);
+      }
+      ImGui::EndChild();
+
+      // Tree splitter: record raw input; the drag is resolved in OnUpdate. Cursor is a pure visual.
+      ImGui::SameLine(0.0f, 0.0f);
+      ImGui::InvisibleButton("##tsplit", ImVec2(tree_grip, body.y));
+      out->TreeGripActivated = ImGui::IsItemActivated();
+      out->MouseLeftDown     = ImGui::IsMouseDown(ImGuiMouseButton_Left);
+      out->MouseX            = io.MousePos.x;
+      out->TreeGripMinX      = ImGui::GetItemRectMin().x;
+      out->TreeOriginX       = tree_origin_x;
+      if (data->TreeDragging || ImGui::IsItemHovered())
+      {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+      }
+      ImGui::SameLine(0.0f, 0.0f);
+
+      // Right column: node graph canvas on top, code inspector on the bottom split.
+      if (ImGui::BeginChild("##Right", ImVec2(right_w, 0.0f)))
+      {
+        const float col_w = ImGui::GetContentRegionAvail().x;
+        const float code_grip = (doc->CodeH > 0.0f) ? em * 0.5f : 0.0f;
+        const float min_canvas_h = em * 8.0f;
+        const float code_max = ImMax(0.0f, body.y - min_canvas_h - code_grip);
+        const float code_h = ImClamp(doc->CodeH, 0.0f, code_max);
+        const float canvas_h = ImMax(0.0f, body.y - code_h - code_grip);
+
+        if (ImGui::BeginChild("##NodeGraph", ImVec2(col_w, canvas_h), ImGuiChildFlags_Borders))
+        {
+          ImGui::ShowAppGraphEditor(app, graph, &selection, doc->ShowLive);
+        }
+        ImGui::EndChild();
+
+        if (code_h > 0.0f)
+        {
+          // Code splitter: record raw input only.
+          ImGui::InvisibleButton("##hsplit", ImVec2(col_w, code_grip));
+          out->CodeGripActive = ImGui::IsItemActive();
+          out->CodeResolved   = code_h;
+          out->CodeMax        = code_max;
+          out->MouseDY        = io.MouseDelta.y;
+          out->CodeSnapClosed = !out->CodeGripActive && code_h < em * 4.0f;
+          if (out->CodeGripActive || ImGui::IsItemHovered())
+          {
+            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+          }
+
+          if (ImGui::BeginChild("##CodePanel", ImVec2(col_w, code_h), ImGuiChildFlags_Borders))
+          {
+            ImGui::AlignTextToFramePadding();
+            if (data->HasCode)
+            {
+              ImGui::TextDisabled("Generated C++ - %s", data->CodeName);
+            }
+            else
+            {
+              ImGui::TextDisabled("Generated C++");
+            }
+            if (data->CodeText.size() > 0)
+            {
+              ImGui::SameLine();
+              if (ImGui::SmallButton("Copy"))
+              {
+                ImGui::SetClipboardText(data->CodeText.c_str());
+              }
+            }
+            if (doc->WriteMsg[0])
+            {
+              ImGui::SameLine();
+              ImGui::TextColored(ImVec4(0.45f,0.85f,0.45f,1.0f), "%s", doc->WriteMsg);
+            }
+            if (!data->HasCode)
+            {
+              ImGui::TextDisabled("Select a node to see its generated code.");
+            }
+            else
+            {
+              // Monospace so space-padded column alignment (e.g. the generated enum '=' column) lines up.
+              if (g_AppCodeFont)
+              {
+                ImGui::PushFont(g_AppCodeFont, 0.0f);
+              }
+              ImGui::InputTextMultiline("##code", data->CodeText.Buf.Data, (size_t)data->CodeText.Buf.Capacity, ImVec2(-FLT_MIN, -FLT_MIN), ImGuiInputTextFlags_ReadOnly);
+              if (g_AppCodeFont)
+              {
+                ImGui::PopFont();
+              }
+            }
+          }
+          ImGui::EndChild();
+        }
+      }
+      ImGui::EndChild();
+
+      // Record the selection change for OnUpdate to apply (the tree/canvas widgets edited the local copy).
+      out->SelectionChanged = (selection != doc->Selection);
+      out->Selection = selection;
+    }
+  };
+
+  // The host window: empty body; its hosted controls (toolbar, strip, body) fill it in push order. Label is
+  // fixed (not the type-derived unique label) so the saved .ini dock binding + central-node dock still match.
+  struct MetricsDebuggerWindow : ImGuiAppWindow<MetricsDebuggerWindow>
+  {
+    MetricsDebuggerWindow() { ImStrncpy(this->Label, "ImGuiAppLayer Metrics/Debugger", sizeof(this->Label)); }
+    virtual void OnRender(const ImGuiApp*) const override final {}
+  };
+
+  // The demo's own control panel, dogfooded as a framework window+control rather than a pile of function statics:
+  // the example toggles and their "applied" bookkeeping live in PersistData. ShowAppLayerDemo reads these flags to
+  // compose the mirrored example app. The MenuItems are ImGui-bound writes (MenuItem takes a bool*), so the menu is
+  // the one render-time mutation here -- the same category as the Show-live checkbox.
+  struct DemoMenuData
+  {
+    bool ShowBaseWindow;
+    bool ShowStatusBar;
+    bool ShowRandomTime;
+    bool ShowBreathing;
+    bool ShowMetrics;
+    bool AppliedBaseWindow;
+    bool AppliedStatusBar;
+    bool AppliedRandomTime;
+    bool AppliedBreathing;
+  };
+  struct DemoMenuTempData {};
+  struct DemoMenuControl : ImGuiAppControl<DemoMenuData, DemoMenuTempData>
+  {
+    virtual void OnRender(const DemoMenuData* cdata, DemoMenuTempData*) const override final
+    {
+      DemoMenuData* data = const_cast<DemoMenuData*>(cdata);
+      if (ImGui::BeginMenuBar())
+      {
+        if (ImGui::BeginMenu("Examples"))
+        {
+          ImGui::MenuItem("Base window",          nullptr, &data->ShowBaseWindow);
+          ImGui::MenuItem("Status bar",           nullptr, &data->ShowStatusBar);
+          ImGui::MenuItem("Random Time control",  nullptr, &data->ShowRandomTime);
+          ImGui::MenuItem("Breathing control",    nullptr, &data->ShowBreathing);
+          ImGui::EndMenu();
+        }
+        if (ImGui::BeginMenu("Tools"))
+        {
+          ImGui::MenuItem("Metrics/Debugger", nullptr, &data->ShowMetrics);
+          ImGui::EndMenu();
+        }
+        ImGui::EndMenuBar();
+      }
+
+      ImGui::Text("ImGuiAppLayer says hello! (%s) (%d)", IMGUI_APPLAYER_VERSION, IMGUI_APPLAYER_VERSION_NUM);
+      ImGui::Spacing();
+      ImGui::TextWrapped("%s", "Enable examples from the Examples menu to push/pop them on a live "
+          "ImGuiApp. The Breathing control breathes while hovered for a duration taken from the "
+          "Random Time control when it is active (its source), or a default otherwise.");
+
+      if (ImGui::CollapsingHeader("ImGuiApp Status", ImGuiTreeNodeFlags_DefaultOpen))
+      {
+        ImGui::TextDisabled("See Tools > Metrics/Debugger -> status strip for composition, lifecycle and FPS.");
+      }
+    }
+  };
+
+  static DemoMenuData* GetDemoMenu(ImGuiApp* app)
+  {
+    return static_cast<DemoMenuData*>(app->Data.GetVoidPtr(ImGuiType<DemoMenuData>::ID));
+  }
+
+  struct DemoPanelWindow : ImGuiAppWindow<DemoPanelWindow>
+  {
+    DemoPanelWindow() { ImStrncpy(this->Label, "ImGuiAppLayer Demo", sizeof(this->Label)); this->Flags = ImGuiWindowFlags_MenuBar; }
+    virtual void OnRender(const ImGuiApp*) const override final {}
+  };
 }
 
 namespace ImGui
 {
+  IMGUI_API void SetAppCodeFont(ImFont* font) { g_AppCodeFont = font; }
+
   IMGUI_API void ShowAppLayerDemo(bool* p_open)
   {
-      static ImGuiApp app;
+      static ImGuiApp app;          // the mirrored "example" app the demo composes
 
       // imnodes shares the current ImGui context; create its context once (lives for the session).
       static bool imnodes_ready = false;
-      if (!imnodes_ready) { ImNodes::CreateContext(); imnodes_ready = true; }
-
-      // Each example is an independent on/off toggle, like Dear ImGui's Menu > Examples.
-      // Everything starts off so the demo is opt-in (nothing spawns until you toggle it).
-      static bool show_base_window  = false;
-      static bool show_status_bar   = false;
-      static bool show_random_time  = false;
-      static bool show_breathing    = false;
-      static bool applied_base_window = false;
-      static bool applied_status_bar  = false;
-      static bool applied_random_time = false;
-      static bool applied_breathing   = false;
-      static bool show_metrics        = false;
-
-      bool dirty = false;
-
-      if (ImGui::Begin("ImGuiAppLayer Demo", p_open, ImGuiWindowFlags_MenuBar))
+      if (!imnodes_ready)
       {
-        if (ImGui::BeginMenuBar())
-        {
-          if (ImGui::BeginMenu("Examples"))
-          {
-            dirty |= ImGui::MenuItem("Base window",          nullptr, &show_base_window);
-            dirty |= ImGui::MenuItem("Status bar",           nullptr, &show_status_bar);
-            dirty |= ImGui::MenuItem("Random Time control",  nullptr, &show_random_time);
-            dirty |= ImGui::MenuItem("Breathing control",    nullptr, &show_breathing);
-            ImGui::EndMenu();
-          }
-          if (ImGui::BeginMenu("Tools"))
-          {
-            ImGui::MenuItem("Metrics/Debugger", nullptr, &show_metrics);
-            ImGui::EndMenu();
-          }
-          ImGui::EndMenuBar();
-        }
-
-        ImGui::Text("ImGuiAppLayer says hello! (%s) (%d)", IMGUI_APPLAYER_VERSION, IMGUI_APPLAYER_VERSION_NUM);
-        ImGui::Spacing();
-        ImGui::TextWrapped("%s", "Enable examples from the Examples menu to push/pop them on a live "
-            "ImGuiApp. The Breathing control breathes while hovered for a duration taken from the "
-            "Random Time control when it is active (its source), or a default otherwise.");
-
-        if (ImGui::CollapsingHeader("ImGuiApp Status", ImGuiTreeNodeFlags_DefaultOpen))
-        {
-          // All runtime status (composition, lifecycle, one FPS, backend) now reads from a single coherent
-          // source: the Metrics/Debugger status strip. Kept here only as a pointer so it isn't told twice.
-          ImGui::TextDisabled("See Tools > Metrics/Debugger -> status strip for composition, lifecycle and FPS.");
-        }
+        ImNodes::CreateContext();
+        imnodes_ready = true;
       }
-      ImGui::End();
 
-      if (show_metrics)
+      // ---- editor_app: a dedicated, never-rebuilt ImGuiApp hosting BOTH the demo's control panel and the
+      //      dogfooded Metrics/Debugger. Pushed once so the graph + toggle state survive example rebuilds. Toggle
+      //      state lives in DemoMenuData (PersistData), not function statics. Only the WindowLayer is needed.
+      static ImGuiApp editor_app;
+      static bool editor_ready = false;
+      if (!editor_ready)
       {
-        const float em = ImGui::GetFontSize();
-        // Default size relative to the viewport work area (matches the current docked-full config); used only
-        // when the window is floating -- when docked into the central node it fills that node instead.
-        const ImGuiViewport* mvp = ImGui::GetMainViewport();
-        ImGui::SetNextWindowSize(ImVec2(mvp->WorkSize.x * 0.66f, mvp->WorkSize.y * 0.66f), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowSizeConstraints(ImVec2(mvp->WorkSize.x * 0.35f, mvp->WorkSize.y * 0.30f), ImVec2(FLT_MAX, FLT_MAX));
-        ImGui::SetNextWindowBgAlpha(1.0f);    // opaque: no other-window text bleeding through the editor
-        if (ImGui::Begin("ImGuiAppLayer Metrics/Debugger", &show_metrics))
+        ImGuiViewport* vp = ImGui::GetMainViewport();
+        ImGui::PushAppLayer<ImGuiAppWindowLayer>(&editor_app);
+
+        // Demo control panel (menu + blurb).
+        ImGui::PushAppWindow<DemoPanelWindow>(&editor_app);
+        ImGuiAppWindowBase* panel = editor_app.Windows.back();
+        panel->HasInitialPlacement = true;
+        panel->InitialSize = ImVec2(vp->WorkSize.x * 0.30f, vp->WorkSize.y * 0.40f);
+        panel->InitialPos  = vp->WorkPos + ImVec2(vp->WorkSize.x * 0.02f, vp->WorkSize.y * 0.04f);
+        ImGui::PushWindowControl<DemoMenuControl>(&editor_app, panel);
+
+        // Metrics/Debugger (GraphDoc + Toolbar + StatusStrip + EditorBody).
+        ImGui::PushAppWindow<MetricsDebuggerWindow>(&editor_app);
+        ImGuiAppWindowBase* metrics = editor_app.Windows.back();
+        metrics->HasInitialPlacement = true;
+        metrics->InitialSize = ImVec2(vp->WorkSize.x * 0.66f, vp->WorkSize.y * 0.66f);
+        metrics->InitialPos  = vp->WorkPos + ImVec2(vp->WorkSize.x * 0.10f, vp->WorkSize.y * 0.10f);
+        ImGui::PushWindowControl<GraphDocControl>(&editor_app, metrics);   // producer: owns the doc (push first)
+        ImGui::PushWindowControl<ToolbarControl>(&editor_app, metrics);    // consumers depend on GraphDocData
+        ImGui::PushWindowControl<StatusStripControl>(&editor_app, metrics);
+        ImGui::PushWindowControl<EditorBodyControl>(&editor_app, metrics);
+        if (GraphDocData* d = GetGraphDoc(&editor_app))
         {
-          // The whole authored object-model graph: App/Layer/Window/Sidebar/Control nodes, typed
-          // containment + data-dependency links, and field bindings -- one owned model with a single
-          // monotonic id allocator. Seeded on first use so the canvas is not empty.
-          static ImGuiAppGraph graph;
-          static const char* graph_path = "imguix_node_graph.txt";
-          static const char* header_path = "imguix_generated_control.h";
-          static ImGuiTextBuffer code;                   // live inspector: generated code for the selected node
-          static float code_w = 0.0f;                    // code-panel width; 0 == collapsed (default)
-          static char write_msg[64] = "";                // transient "wrote header" confirmation
-          static bool show_live = true;                  // show (vs hide -- never delete) the live-mirror nodes
-          static int sel = -1;                           // window-level selection shared by tree + canvas (Theme C)
-          if (graph.Nodes.empty())
-            SeedAppGraph(&graph);
-
-          const ImGuiIO& io = ImGui::GetIO();
-          const ImGuiStyle& style = ImGui::GetStyle();
-
-          // -- Reconcile-before-report (design 3.0b): build the live mirror (model-only, no imnodes) FIRST so
-          //    every readout below sees the reconciled graph; the strip can never disagree with the canvas for
-          //    a frame. Theme E: always build -- "Show live mirror" hides on the canvas, it never deletes.
-          ImGui::BuildAppLiveGraph(&app, &graph);
-
-          // -- One topo result, computed once on the reconciled graph, feeds every health readout.
-          ImVector<int> topo_order;
-          char topo_err[160];
-          const bool topo_ok = ImGui::AppGraphTopoOrder(&graph, &topo_order, topo_err, IM_ARRAYSIZE(topo_err));
-
-          // -- One classification pass over the reconciled graph: design / live / promoted counts.
-          int n_design = 0, n_live = 0, n_promoted = 0;
-          for (int i = 0; i < graph.Nodes.Size; i++)
-          {
-            const ImGuiAppNode* nn = &graph.Nodes.Data[i];
-            if (nn->IsLive) n_live++; else n_design++;
-            if (nn->IsPromoted) n_promoted++;
-          }
-
-          auto ToolSep = [&]()                           // vertical rule between toolbar/strip groups
-          {
-            ImGui::SameLine(0.0f, em * 0.6f);
-            ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);   // imgui_internal.h (already included)
-            ImGui::SameLine(0.0f, em * 0.6f);
-          };
-          auto HelpMarker = [](const char* desc)         // always-visible discoverability
-          {
-            ImGui::AlignTextToFramePadding();
-            ImGui::TextDisabled("(?)");
-            ImGui::SetItemTooltip("%s", desc);
-          };
-          // One status grammar reused by every strip segment. level: 0 neutral, 1 ok, 2 warn, 3 err. ASCII only
-          // (no glyphs outside the default font atlas). Reuses the fps palette + TextDisabled.
-          auto StatusPill = [&](const char* text, int level)
-          {
-            static const ImVec4 kCol[4] = {
-              style.Colors[ImGuiCol_TextDisabled],          // neutral
-              ImVec4(0.45f, 0.85f, 0.45f, 1.0f),            // ok    (== fps green)
-              ImVec4(0.90f, 0.80f, 0.35f, 1.0f),            // warn  (== fps yellow)
-              ImVec4(0.90f, 0.45f, 0.45f, 1.0f) };          // err   (== fps red)
-            ImGui::AlignTextToFramePadding();
-            ImGui::TextColored(kCol[level], "%s", text);
-          };
-
-          // -------------------------------------------------------------------------------
-          // 1) Framed segmented toolbar: one subtle-framed, auto-height row, grouped by rules.
-          // -------------------------------------------------------------------------------
-          ImGui::BeginChild("##Toolbar", ImVec2(0.0f, 0.0f), ImGuiChildFlags_FrameStyle | ImGuiChildFlags_AutoResizeY);
-          {
-            // [Node]
-            if (ImGui::Button("+ Add node"))
-              ImGui::OpenPopup("##addnode");
-            ImGui::SetItemTooltip("Add a node (App / Layer / Window / Sidebar / Control) to the canvas");
-            if (ImGui::BeginPopup("##addnode"))
-            {
-              ShowNodePalette(&graph);
-              ImGui::EndPopup();
-            }
-
-            ToolSep();
-
-            // [Graph I/O] -- the popup hit-tests the Save button, so capture hover BEFORE the popup
-            // and emit the tooltip AFTER, so neither clobbers the other's last-item id.
-            if (ImGui::Button("Save"))
-              ImGui::SaveAppGraph(graph_path, &graph);
-            const bool save_hovered = ImGui::IsItemHovered();
-            if (ImGui::BeginPopupContextItem("##savepath"))
-            {
-              ImGui::TextDisabled("Graph file:");
-              ImGui::TextUnformatted(graph_path);
-              ImGui::EndPopup();
-            }
-            if (save_hovered)
-              ImGui::SetTooltip("Save graph -> %s  (right-click for path)", graph_path);
-            ImGui::SameLine();
-            if (ImGui::Button("Load"))
-              ImGui::LoadAppGraph(graph_path, &graph);
-            ImGui::SetItemTooltip("Load graph <- %s", graph_path);
-
-            ToolSep();
-
-            // [Codegen] No Generate button: the code panel is a LIVE inspector that always shows the selected
-            // node's generated code (regenerated below from `sel`). "Write .h" exports the whole-graph header.
-            if (ImGui::Button("Write .h"))
-            {
-              ImGuiTextBuffer full;
-              ImGui::GenerateAppGraphCode(&graph, &full);   // whole graph: structs + deps + bring-up, topo-ordered
-              if (ImFileHandle fh = ImFileOpen(header_path, "wt"))
-              {
-                ImFileWrite(full.c_str(), sizeof(char), (ImU64)full.size(), fh);
-                ImFileClose(fh);
-                ImFormatString(write_msg, IM_ARRAYSIZE(write_msg), "wrote %s", header_path);
-              }
-            }
-            ImGui::SetItemTooltip("Write whole-graph C++ -> %s", header_path);
-
-            ImGui::SameLine();
-            const bool code_open = code_w > 0.0f;        // latch before the button (stack-safe tint)
-            if (code_open) ImGui::PushStyleColor(ImGuiCol_Button, style.Colors[ImGuiCol_ButtonActive]);
-            if (ImGui::Button(code_open ? "Code v" : "Code >"))
-              code_w = code_open ? 0.0f : em * 22.0f;    // mutates code_w, NOT code_open
-            if (code_open) ImGui::PopStyleColor();        // gated on the same latch -> always balanced
-            ImGui::SetItemTooltip("Show / hide the generated-code inspector");
-
-            ToolSep();
-
-            // [Live] show or hide (never delete) the read-only nodes mirrored from the running app.
-            ImGui::Checkbox("Show live mirror", &show_live);
-            ImGui::SetItemTooltip("Hide/show read-only nodes mirrored from the running app. Hiding never deletes your design.");
-
-            ToolSep();
-            HelpMarker("Drag from a node's output port to another node's input port to connect. "
-                       "Click a node's title to rename it; per-node edit and Delete live inside each node. "
-                       "Right-click Save for its file path.\n\n"
-                       "Origin: design nodes are what you author and codegen emits; live (steel-blue) nodes "
-                       "mirror the running app read-only; a design control is promoted (green) when its data "
-                       "type matches a live one. 'Show live mirror' hides the live nodes without deleting them.");
-          }
-          ImGui::EndChild();
-
-          // -------------------------------------------------------------------------------
-          // 1b) Legend micro-row (Theme D): ASCII swatches reading the same origin constants as the canvas.
-          //     ImVec4s mirror kAppLiveTint / kAppPromotedTint in imgui_applayer_nodes.cpp.
-          // -------------------------------------------------------------------------------
-          {
-            const ImVec4 live_col = ImVec4(90 / 255.0f, 120 / 255.0f, 165 / 255.0f, 1.0f);
-            const ImVec4 prom_col = ImVec4(80 / 255.0f, 150 / 255.0f,  90 / 255.0f, 1.0f);
-            ImGui::AlignTextToFramePadding(); ImGui::TextDisabled("[ ] design");
-            ImGui::SameLine(0.0f, em * 0.8f); ImGui::TextColored(live_col, "[#] live (read-only)");
-            ImGui::SameLine(0.0f, em * 0.8f); ImGui::TextColored(prom_col, "[#] promoted");
-          }
-
-          // -------------------------------------------------------------------------------
-          // 1c) Status strip (Theme A): one full-width framed row, every readout in one grammar from the single
-          //     reconciled topo result + object model. The one FPS in the build lives here.
-          // -------------------------------------------------------------------------------
-          ImGui::BeginChild("##Strip", ImVec2(0.0f, 0.0f), ImGuiChildFlags_FrameStyle | ImGuiChildFlags_AutoResizeY);
-          {
-            // HEALTH
-            if (topo_ok)
-              StatusPill("graph ok", 1);
-            else
-            {
-              char hb[180];
-              ImFormatString(hb, IM_ARRAYSIZE(hb), "cycle: %s", topo_err[0] ? topo_err : "dependency cycle");
-              StatusPill(hb, 3);
-              ImGui::SetItemTooltip("Code generation is blocked until this cycle is broken.");
-            }
-
-            ToolSep();
-            // NODES -- promoted/live gated on the mirror being shown (they describe the mirror).
-            char nb[96];
-            if (show_live) ImFormatString(nb, IM_ARRAYSIZE(nb), "design %d  live %d  promoted %d", n_design, n_live, n_promoted);
-            else           ImFormatString(nb, IM_ARRAYSIZE(nb), "design %d", n_design);
-            StatusPill(nb, 0);
-
-            ToolSep();
-            // COMPOSITION -- object model, identical whether the mirror is shown or hidden (Layers no longer dropped).
-            char cb[64];
-            ImFormatString(cb, IM_ARRAYSIZE(cb), "L%d W%d S%d C%d", app.Layers.Size, app.Windows.Size, app.Sidebars.Size, app.Controls.Size);
-            StatusPill(cb, 0);
-
-            ToolSep();
-            // LIFECYCLE -- the debugger can finally debug the lifecycle.
-            StatusPill(app.Initialized ? "init" : "uninit", app.Initialized ? 1 : 0);
-            ImGui::SameLine(0.0f, em * 0.6f);
-            char lb[64];
-            ImFormatString(lb, IM_ARRAYSIZE(lb), "storage %d  shutdown: %s", app.StorageEntries.Size, app.ShutdownPending ? "yes" : "no");
-            StatusPill(lb, 0);
-
-            ToolSep();
-            // SELECTION breadcrumb (left-aligned, the first non-canvas surfacing of promotion).
-            char bc[IM_LABEL_SIZE * 2];
-            ImGui::AppGraphSelectionBreadcrumb(&graph, sel, bc, IM_ARRAYSIZE(bc));
-            StatusPill(bc, 0);
-          }
-          ImGui::EndChild();
-
-          // -------------------------------------------------------------------------------
-          // 2) Body: canvas (hero) + draggable vertical splitter + collapsible code panel.
-          // -------------------------------------------------------------------------------
-          const ImVec2 body = ImGui::GetContentRegionAvail();
-          const float tree_origin_x = ImGui::GetCursorScreenPos().x;   // screen-space left edge of the tree child
-          static float tree_w = 0.0f;                    // left outliner width (resizable)
-          if (tree_w <= 0.0f) tree_w = em * 16.0f;       // sensible default on first show (fits layer type names)
-          const float tree_grip = em * 0.5f;
-          const float min_canvas = em * 16.0f;           // canvas never starves
-          const float grip_w = (code_w > 0.0f) ? em * 0.5f : 0.0f;
-
-          // Resize by pinning the tree's right edge to the mouse, computed BEFORE rendering the child so the
-          // edge tracks the cursor with no per-frame lag or drift. tree_grab_dx is the offset within the grip
-          // captured at grab time, so the edge doesn't jump when you click.
-          static bool  tree_drag = false;
-          static float tree_grab_dx = 0.0f;
-          if (tree_drag)
-          {
-            if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) tree_drag = false;
-            else tree_w = io.MousePos.x - tree_grab_dx - tree_origin_x;
-          }
-
-          const float max_code = ImMax(0.0f, body.x - tree_w - tree_grip - grip_w - min_canvas);
-          code_w = ImClamp(code_w, 0.0f, max_code);
-          tree_w = ImClamp(tree_w, em * 9.0f, ImMax(em * 9.0f, body.x - tree_grip - code_w - grip_w - min_canvas));
-          const float canvas_w = ImMax(0.0f, body.x - tree_w - tree_grip - code_w - grip_w);
-
-          // Left: scene-hierarchy tree (resizable) communicating the whole app + the authored graph. Selection
-          // is the window-level `sel`, shared with the canvas; the editor reconciles both directions (Theme C).
-          ImGui::BeginChild("##Tree", ImVec2(tree_w, 0.0f), ImGuiChildFlags_Borders);
-          {
-            ImGui::ShowAppGraphTree(&app, &graph, &sel);
-          }
-          ImGui::EndChild();
-
-          // Tree/canvas splitter.
-          ImGui::SameLine(0.0f, 0.0f);
-          ImGui::InvisibleButton("##tsplit", ImVec2(tree_grip, body.y));
-          if (ImGui::IsItemActivated()) { tree_drag = true; tree_grab_dx = io.MousePos.x - ImGui::GetItemRectMin().x; }
-          if (tree_drag || ImGui::IsItemHovered()) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
-          {
-            const ImVec2 tr0 = ImGui::GetItemRectMin(), tr1 = ImGui::GetItemRectMax();
-            const float tcx = (tr0.x + tr1.x) * 0.5f;
-            const ImU32 tcol = ImGui::GetColorU32(tree_drag ? ImGuiCol_SeparatorActive
-                                                 : ImGui::IsItemHovered() ? ImGuiCol_SeparatorHovered
-                                                                          : ImGuiCol_Separator);
-            ImGui::GetWindowDrawList()->AddLine(ImVec2(tcx, tr0.y), ImVec2(tcx, tr1.y), tcol, 1.0f);
-          }
-          ImGui::SameLine(0.0f, 0.0f);
-
-          ImGui::BeginChild("##NodeGraph", ImVec2(canvas_w, 0.0f), ImGuiChildFlags_Borders);
-          {
-            if (graph.Links.Size == 0)                   // transient hint, gone after the first link
-              ImGui::TextDisabled("Tip: drag a node's output port to another node's input port to connect");
-            // The live mirror is reconciled once at the top of the window; the editor only renders it. show_live
-            // hides the live nodes without deleting them (Theme E).
-            ShowAppGraphEditor(&app, &graph, &sel, show_live);
-          }
-          ImGui::EndChild();
-
-          if (code_w > 0.0f)
-          {
-            // Vertical splitter grip: emitted in the PARENT window AFTER EndChild(##NodeGraph), i.e.
-            // fully outside BeginNodeEditor/EndNodeEditor, so it can never pan the canvas.
-            ImGui::SameLine(0.0f, 0.0f);
-            ImGui::InvisibleButton("##vsplit", ImVec2(grip_w, body.y));
-            const bool sp_active = ImGui::IsItemActive();
-            const bool sp_hover = ImGui::IsItemHovered();
-            if (sp_active) code_w -= io.MouseDelta.x;     // drag left widens the panel
-            if (sp_active || sp_hover) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
-            const ImU32 gc = ImGui::GetColorU32(sp_active ? ImGuiCol_SeparatorActive
-                                              : sp_hover ? ImGuiCol_SeparatorHovered
-                                                         : ImGuiCol_Separator);
-            const ImVec2 r0 = ImGui::GetItemRectMin(), r1 = ImGui::GetItemRectMax();
-            const float cx = (r0.x + r1.x) * 0.5f;
-            ImGui::GetWindowDrawList()->AddLine(ImVec2(cx, r0.y), ImVec2(cx, r1.y), gc, 1.0f);
-
-            code_w = ImClamp(code_w, 0.0f, max_code);     // re-clamp after the drag
-            if (!sp_active && code_w < em * 6.0f) code_w = 0.0f;   // release below threshold -> snap shut
-
-            if (code_w > 0.0f)                            // re-test AFTER snap: do not submit the panel on
-            {                                             // the close frame (a width-0 child fills remaining)
-              ImGui::SameLine(0.0f, 0.0f);
-              ImGui::BeginChild("##CodePanel", ImVec2(code_w, 0.0f), ImGuiChildFlags_Borders);
-              {
-                // Live inspector: regenerate the selected node's code every frame so edits show instantly.
-                ImGuiAppNode* seln = (sel >= 0) ? ImGui::AppGraphFindNode(&graph, sel) : nullptr;
-                code.clear();
-                if (seln != nullptr)
-                  ImGui::GenerateAppNodeCode(&graph, seln, &code);
-
-                ImGui::AlignTextToFramePadding();
-                if (seln != nullptr) ImGui::TextDisabled("Generated C++ - %s", seln->Draft.Name);
-                else                 ImGui::TextDisabled("Generated C++");
-                if (code.size() > 0)
-                {
-                  ImGui::SameLine();
-                  if (ImGui::SmallButton("Copy"))
-                    ImGui::SetClipboardText(code.c_str());
-                }
-                if (write_msg[0])
-                {
-                  ImGui::SameLine();
-                  ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.45f, 1.0f), "%s", write_msg);
-                }
-                if (seln == nullptr)
-                  ImGui::TextDisabled("Select a node to see its generated code.");
-                else
-                  ImGui::InputTextMultiline("##code", code.Buf.Data, (size_t)code.Buf.Capacity,
-                      ImVec2(-FLT_MIN, -FLT_MIN), ImGuiInputTextFlags_ReadOnly);
-              }
-              ImGui::EndChild();
-            }
-          }
+          d->Mirror = &app;
         }
-        ImGui::End();
+        editor_ready = true;
+      }
+
+      ImGuiAppWindowBase* panel   = editor_app.Windows[0];
+      ImGuiAppWindowBase* metrics = editor_app.Windows[1];
+      DemoMenuData* st = GetDemoMenu(&editor_app);
+
+      // Drive the framework windows' Open from the external/menu flags, tick the editor app, then read the X
+      // buttons back out. The menu (a control on `panel`) toggles st->* during RenderApp.
+      panel->Open   = (p_open == nullptr) || *p_open;
+      metrics->Open = st->ShowMetrics;
+      ImGui::UpdateApp(&editor_app);
+      ImGui::RenderApp(&editor_app);
+      if (p_open != nullptr)     // panel X closes the whole demo
+      {
+        *p_open = panel->Open;
+      }
+      if (!metrics->Open)        // metrics X syncs the menu toggle
+      {
+        st->ShowMetrics = false;
       }
 
       // Reconcile desired -> live app. Full rebuild keeps app storage consistent across toggles. Also fire on
       // first frame (!Initialized) so the framework layers (Task/Command/Status/Window) exist immediately and
       // are visible in the tree/canvas without needing to toggle an example.
       if (!app.IsInitialized() ||
-          dirty ||
-          applied_base_window != show_base_window  ||
-          applied_status_bar  != show_status_bar   ||
-          applied_random_time != show_random_time  ||
-          applied_breathing   != show_breathing)
+          st->AppliedBaseWindow != st->ShowBaseWindow ||
+          st->AppliedStatusBar  != st->ShowStatusBar  ||
+          st->AppliedRandomTime != st->ShowRandomTime ||
+          st->AppliedBreathing  != st->ShowBreathing)
       {
         ShutdownApp(&app);
         InitializeApp(&app);
@@ -644,7 +888,7 @@ namespace ImGui
         ImGuiViewport* vp = ImGui::GetMainViewport();
         const float em = ImGui::GetFontSize();       // text size: drives all sizing, scales with DPI/font
 
-        if (show_base_window)
+        if (st->ShowBaseWindow)
         {
           PushAppWindow<BaseWindow>(&app);
           ImGuiAppWindowBase* w = app.Windows.back();
@@ -653,25 +897,33 @@ namespace ImGui
           w->InitialPos  = ImVec2(vp->WorkPos.x + vp->WorkSize.x * 0.5f, vp->WorkPos.y + em * 2.0f);
         }
 
-        if (show_status_bar)
+        if (st->ShowStatusBar)
+        {
           PushAppSidebar<StatusBar>(&app, vp, ImGuiDir_Down, 0.0f, ImGuiWindowFlags_AlwaysAutoResize);
+        }
 
         // Controls are app-level: they render their own windows, no host sidebar needed.
-        if (show_random_time)
+        if (st->ShowRandomTime)
+        {
           PushAppControl<RandomTimeControlDemo>(&app);
-        if (show_breathing)
+        }
+        if (st->ShowBreathing)
+        {
           PushAppControl<BreathingControlDemo>(&app);
+        }
 
-        applied_base_window = show_base_window;
-        applied_status_bar  = show_status_bar;
-        applied_random_time = show_random_time;
-        applied_breathing   = show_breathing;
+        st->AppliedBaseWindow = st->ShowBaseWindow;
+        st->AppliedStatusBar  = st->ShowStatusBar;
+        st->AppliedRandomTime = st->ShowRandomTime;
+        st->AppliedBreathing  = st->ShowBreathing;
       }
 
       UpdateApp(&app);
       RenderApp(&app);
 
       if (app.ShutdownPending)
+      {
         ShutdownApp(&app);
+      }
   }
 }
