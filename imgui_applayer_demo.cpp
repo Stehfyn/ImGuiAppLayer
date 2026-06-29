@@ -216,12 +216,15 @@ namespace
 
   // imnodes data-flow graph: shows the Breathing control's duration input being fed by the
   // Random Time control (its source) when active, or a Default node otherwise.
-  void ShowDataFlowGraph(ImGuiApp* app, bool show_random_time, bool show_breathing, ImGuiAppNodeDraft* draft,
+  void ShowDataFlowGraph(ImGuiApp* app, bool show_random_time, bool show_breathing, ImVector<ImGuiAppNodeDraft>* drafts,
                          ImVector<ImGuiAppNodeLink>* links, int* next_link_id)
   {
     IM_ASSERT(app != nullptr);
 
-    enum { NODE_RT = 1, NODE_DEFAULT, NODE_BREATHING, NODE_DRAFT, ATTR_RT_OUT = 10, ATTR_DEFAULT_OUT, ATTR_BR_IN };
+    // Fixed nodes/attrs use the low ids; drafts get their own id ranges so an arbitrary number of
+    // them never collides with the fixed nodes (or each other).
+    enum { NODE_RT = 1, NODE_DEFAULT, NODE_BREATHING, ATTR_RT_OUT = 10, ATTR_DEFAULT_OUT, ATTR_BR_IN,
+           NODE_DRAFT_BASE = 100, ATTR_DRAFT_BASE = 200 };
 
     RandomTimeData*             rt = static_cast<RandomTimeData*>(app->Data.GetVoidPtr(ImGuiType<RandomTimeData>::ID));
     const BreathingControlData* br = static_cast<const BreathingControlData*>(app->Data.GetVoidPtr(ImGuiType<BreathingControlData>::ID));
@@ -267,14 +270,44 @@ namespace
       ImGui::EndAppNode();
     }
 
-    // Design-phase node: rendered from a runtime draft (no backing C++ type yet).
-    if (draft)
+    // Design-phase nodes: each draft is edited in place, inside its own node. Interactive widgets
+    // inside an imnodes node must live in an attribute (here a static one) so the canvas does not
+    // pan/drag while the user types or opens the type combos. The user adds drafts from the side
+    // panel; each new one is positioned once (staggered) and dragged freely thereafter.
+    int draft_to_remove = -1;
+    if (drafts)
     {
-      static bool placed_draft = false;
-      if (!placed_draft) { ImNodes::SetNodeGridSpacePos(NODE_DRAFT, ImVec2(224.0f, 200.0f)); placed_draft = true; }
-      ImGui::BeginAppNode(NODE_DRAFT, draft->Name);
-      ImGui::DrawAppNodeDraft(draft);
-      ImGui::EndAppNode();
+      static int placed_draft_count = 0;
+      static int editing_node_id = -1;               // which draft node's title is being renamed (-1 = none)
+      for (int i = 0; i < drafts->Size; i++)
+      {
+        ImGuiAppNodeDraft* draft = &drafts->Data[i];
+        const int node_id = NODE_DRAFT_BASE + i;
+        const int attr_id = ATTR_DRAFT_BASE + i;
+
+        if (i >= placed_draft_count)
+          ImNodes::SetNodeGridSpacePos(node_id, ImVec2(224.0f + (i % 3) * 48.0f, 200.0f + (i % 3) * 48.0f));
+
+        // Title is the name: click it to rename inline. The body holds just the fields now.
+        ImGui::BeginAppNodeRenamable(node_id, draft->Name, IM_ARRAYSIZE(draft->Name), &editing_node_id);
+        ImNodes::BeginStaticAttribute(attr_id);
+        ImGui::PushID(i);                              // disambiguate the per-row widget ids across drafts
+        ImGui::EditAppNodeDraftFields(draft);
+        if (ImGui::SmallButton("Delete node"))
+          draft_to_remove = i;
+        ImGui::PopID();
+        ImNodes::EndStaticAttribute();
+        ImGui::EndAppNode();
+      }
+      if (drafts->Size > placed_draft_count)
+        placed_draft_count = drafts->Size;
+
+      // Deferred erase: mutating the vector mid-draw would invalidate the draft pointers above.
+      if (draft_to_remove >= 0)
+      {
+        drafts->erase(drafts->Data + draft_to_remove);
+        placed_draft_count = drafts->Size;            // re-place remaining nodes so ids shift cleanly
+      }
     }
 
     // Links come from the model: the user drags between ports to connect (captured below).
@@ -355,74 +388,195 @@ namespace ImGui
       if (show_metrics)
       {
         const float em = ImGui::GetFontSize();
-        // Wide enough for the fixed controls column (~em*22) plus a usable graph canvas beside it.
-        // The min-size constraint applies every frame, so it corrects a stale (cramped) size loaded
-        // from imgui.ini, where SetNextWindowSize(..., FirstUseEver) would be ignored.
         ImGui::SetNextWindowSize(ImVec2(em * 64.0f, em * 34.0f), ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowSizeConstraints(ImVec2(em * 46.0f, em * 24.0f), ImVec2(FLT_MAX, FLT_MAX));
         if (ImGui::Begin("ImGuiAppLayer Metrics/Debugger", &show_metrics))
         {
-          // A persistent draft the user designs in the inspector below; rendered as a live node.
-          // Links the user drags between ports live in the model alongside it.
-          static ImGuiAppNodeDraft draft;
+          // Persistent drafts the user designs in the graph; each renders as a live node. Links the
+          // user drags between ports live in the model alongside them. Seed one draft on first use.
+          static ImVector<ImGuiAppNodeDraft> drafts;
           static ImVector<ImGuiAppNodeLink> links;
           static int next_link_id = 1000;
           static const char* graph_path = "imguix_node_graph.txt";
+          static const char* header_path = "imguix_generated_control.h";
+          static ImGuiTextBuffer code;
+          static float code_w = 0.0f;                    // code-panel width; 0 == collapsed (default)
+          static char write_msg[64] = "";                // transient "wrote header" confirmation
+          if (drafts.empty())
+            drafts.push_back(ImGuiAppNodeDraft());
 
           const ImGuiIO& io = ImGui::GetIO();
-          ImGui::Text("%.1f FPS   Controls: %d   Windows: %d   Sidebars: %d",
-              io.Framerate, app.Controls.Size, app.Windows.Size, app.Sidebars.Size);
+          const ImGuiStyle& style = ImGui::GetStyle();
 
-          // Controls live in a fixed-width column to the left of the graph (not stacked below it).
-          ImGui::BeginChild("##NodeControls", ImVec2(em * 22.0f, 0.0f), ImGuiChildFlags_Borders);
+          auto ToolSep = [&]()                           // vertical rule between toolbar groups
           {
-            if (ImGui::CollapsingHeader("Design Node (draft)", ImGuiTreeNodeFlags_DefaultOpen))
+            ImGui::SameLine(0.0f, em * 0.6f);
+            ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);   // imgui_internal.h (already included)
+            ImGui::SameLine(0.0f, em * 0.6f);
+          };
+          auto HelpMarker = [](const char* desc)         // always-visible discoverability
+          {
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextDisabled("(?)");
+            ImGui::SetItemTooltip("%s", desc);
+          };
+
+          // -------------------------------------------------------------------------------
+          // 1) Framed segmented toolbar: one subtle-framed, auto-height row, grouped by rules.
+          // -------------------------------------------------------------------------------
+          ImGui::BeginChild("##Toolbar", ImVec2(0.0f, 0.0f), ImGuiChildFlags_FrameStyle | ImGuiChildFlags_AutoResizeY);
+          {
+            // [Node]
+            if (ImGui::Button("+ Add node"))
+              drafts.push_back(ImGuiAppNodeDraft());
+            ImGui::SetItemTooltip("Add a draft control node to the canvas");
+
+            ToolSep();
+
+            // [Graph I/O] -- the popup hit-tests the Save button, so capture hover BEFORE the popup
+            // and emit the tooltip AFTER, so neither clobbers the other's last-item id.
+            if (ImGui::Button("Save"))
+              ImGui::SaveAppNodeGraphMulti(graph_path, &drafts, &links);
+            const bool save_hovered = ImGui::IsItemHovered();
+            if (ImGui::BeginPopupContextItem("##savepath"))
             {
-              ImGui::EditAppNodeDraft(&draft);
-              if (ImGui::Button("Save graph"))
-                ImGui::SaveAppNodeGraph(graph_path, &draft, &links);
-              ImGui::SameLine();
-              if (ImGui::Button("Load graph"))
-                ImGui::LoadAppNodeGraph(graph_path, &draft, &links);
+              ImGui::TextDisabled("Graph file:");
+              ImGui::TextUnformatted(graph_path);
+              ImGui::EndPopup();
             }
+            if (save_hovered)
+              ImGui::SetTooltip("Save graph -> %s  (right-click for path)", graph_path);
+            ImGui::SameLine();
+            if (ImGui::Button("Load"))
+              ImGui::LoadAppNodeGraphMulti(graph_path, &drafts, &links);
+            ImGui::SetItemTooltip("Load graph <- %s", graph_path);
 
-            // Generated C++: emit the control skeleton from the draft, view it, write it to a header.
-            if (ImGui::CollapsingHeader("Generated C++", ImGuiTreeNodeFlags_DefaultOpen))
+            ToolSep();
+
+            // [Codegen]
+            if (ImGui::Button("Generate"))
             {
-              static ImGuiTextBuffer code;
-              static const char* header_path = "imguix_generated_control.h";
+              code.clear();
+              for (int i = 0; i < drafts.Size; i++)      // one control per drafted node
+                ImGui::GenerateAppControlCode(&drafts.Data[i], &code);
+              if (code_w <= 0.0f) code_w = em * 22.0f;   // auto-reveal so output is never hidden
+              write_msg[0] = 0;
+            }
+            ImGui::SetItemTooltip("Generate C++ from %d node(s)", drafts.Size);
 
-              if (ImGui::Button("Generate"))
+            ImGui::SameLine();
+            ImGui::BeginDisabled(code.size() == 0);      // nothing to write until generated
+            if (ImGui::Button("Write .h"))
+            {
+              if (ImFileHandle fh = ImFileOpen(header_path, "wt"))
               {
-                code.clear();
-                ImGui::GenerateAppControlCode(&draft, &code);
+                ImFileWrite(code.c_str(), sizeof(char), (ImU64)code.size(), fh);
+                ImFileClose(fh);
+                ImFormatString(write_msg, IM_ARRAYSIZE(write_msg), "wrote %s", header_path);
               }
-              ImGui::SameLine();
-              if (ImGui::Button("Write .h") && code.size() > 0)
+            }
+            ImGui::EndDisabled();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))   // fires even while greyed out
+              ImGui::SetTooltip(code.size() > 0 ? "Write generated C++ -> %s" : "Generate code first", header_path);
+
+            ImGui::SameLine();
+            const bool code_open = code_w > 0.0f;        // latch before the button (stack-safe tint)
+            if (code_open) ImGui::PushStyleColor(ImGuiCol_Button, style.Colors[ImGuiCol_ButtonActive]);
+            if (ImGui::Button(code_open ? "Code v" : "Code >"))
+              code_w = code_open ? 0.0f : em * 22.0f;    // mutates code_w, NOT code_open
+            if (code_open) ImGui::PopStyleColor();        // gated on the same latch -> always balanced
+            ImGui::SetItemTooltip("Show / hide the generated-code panel");
+
+            ToolSep();
+            HelpMarker("Drag from a node's output port to another node's input port to connect. "
+                       "Click a node's title to rename it; per-node edit and Delete live inside each node. "
+                       "Right-click Save for its file path.");
+
+            // Right-aligned live status: FPS (color-coded) | nodes | links | C/W/S.
+            char fps_buf[24], rest_buf[96];
+            ImFormatString(fps_buf, IM_ARRAYSIZE(fps_buf), "%.0f FPS", io.Framerate);
+            ImFormatString(rest_buf, IM_ARRAYSIZE(rest_buf), "  nodes %d  links %d   C%d W%d S%d",
+                drafts.Size, links.Size, app.Controls.Size, app.Windows.Size, app.Sidebars.Size);
+            const float cluster_w = ImGui::CalcTextSize(fps_buf).x + ImGui::CalcTextSize(rest_buf).x;
+            ImGui::SameLine();
+            const float rx = ImGui::GetContentRegionMax().x - cluster_w;   // exact right edge (window-local)
+            if (rx > ImGui::GetCursorPosX())             // skip if it would overlap the buttons
+              ImGui::SetCursorPosX(rx);
+            ImGui::AlignTextToFramePadding();
+            const ImVec4 fps_col = io.Framerate >= 60.0f ? ImVec4(0.45f, 0.85f, 0.45f, 1.0f)
+                                 : io.Framerate >= 30.0f ? ImVec4(0.90f, 0.80f, 0.35f, 1.0f)
+                                                         : ImVec4(0.90f, 0.45f, 0.45f, 1.0f);
+            ImGui::TextColored(fps_col, "%s", fps_buf);
+            ImGui::SameLine(0.0f, 0.0f);
+            ImGui::TextDisabled("%s", rest_buf);
+          }
+          ImGui::EndChild();
+
+          // -------------------------------------------------------------------------------
+          // 2) Body: canvas (hero) + draggable vertical splitter + collapsible code panel.
+          // -------------------------------------------------------------------------------
+          const ImVec2 body = ImGui::GetContentRegionAvail();
+          const float min_canvas = em * 20.0f;           // canvas never starves
+          const float grip_w = (code_w > 0.0f) ? em * 0.5f : 0.0f;
+          const float max_code = ImMax(0.0f, body.x - grip_w - min_canvas);   // clamp ceiling, never negative
+          code_w = ImClamp(code_w, 0.0f, max_code);
+          const float canvas_w = ImMax(0.0f, body.x - code_w - grip_w);
+
+          ImGui::BeginChild("##NodeGraph", ImVec2(canvas_w, 0.0f), ImGuiChildFlags_Borders);
+          {
+            if (links.Size == 0)                         // transient hint, gone after the first link
+              ImGui::TextDisabled("Tip: drag between node ports to connect");
+            ShowDataFlowGraph(&app, show_random_time, show_breathing, &drafts, &links, &next_link_id);
+          }
+          ImGui::EndChild();
+
+          if (code_w > 0.0f)
+          {
+            // Vertical splitter grip: emitted in the PARENT window AFTER EndChild(##NodeGraph), i.e.
+            // fully outside BeginNodeEditor/EndNodeEditor, so it can never pan the canvas.
+            ImGui::SameLine(0.0f, 0.0f);
+            ImGui::InvisibleButton("##vsplit", ImVec2(grip_w, body.y));
+            const bool sp_active = ImGui::IsItemActive();
+            const bool sp_hover = ImGui::IsItemHovered();
+            if (sp_active) code_w -= io.MouseDelta.x;     // drag left widens the panel
+            if (sp_active || sp_hover) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+            const ImU32 gc = ImGui::GetColorU32(sp_active ? ImGuiCol_SeparatorActive
+                                              : sp_hover ? ImGuiCol_SeparatorHovered
+                                                         : ImGuiCol_Separator);
+            const ImVec2 r0 = ImGui::GetItemRectMin(), r1 = ImGui::GetItemRectMax();
+            const float cx = (r0.x + r1.x) * 0.5f;
+            ImGui::GetWindowDrawList()->AddLine(ImVec2(cx, r0.y), ImVec2(cx, r1.y), gc, 1.0f);
+
+            code_w = ImClamp(code_w, 0.0f, max_code);     // re-clamp after the drag
+            if (!sp_active && code_w < em * 6.0f) code_w = 0.0f;   // release below threshold -> snap shut
+
+            if (code_w > 0.0f)                            // re-test AFTER snap: do not submit the panel on
+            {                                             // the close frame (a width-0 child fills remaining)
+              ImGui::SameLine(0.0f, 0.0f);
+              ImGui::BeginChild("##CodePanel", ImVec2(code_w, 0.0f), ImGuiChildFlags_Borders);
               {
-                if (ImFileHandle fh = ImFileOpen(header_path, "wt"))
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextDisabled("Generated C++");
+                if (code.size() > 0)
                 {
-                  ImFileWrite(code.c_str(), sizeof(char), (ImU64)code.size(), fh);
-                  ImFileClose(fh);
+                  ImGui::SameLine();
+                  if (ImGui::SmallButton("Copy"))
+                    ImGui::SetClipboardText(code.c_str());
                 }
+                if (write_msg[0])
+                {
+                  ImGui::SameLine();
+                  ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.45f, 1.0f), "%s", write_msg);
+                }
+                if (code.size() > 0)
+                  ImGui::InputTextMultiline("##code", code.Buf.Data, (size_t)code.Buf.Capacity,
+                      ImVec2(-FLT_MIN, -FLT_MIN), ImGuiInputTextFlags_ReadOnly);
+                else
+                  ImGui::TextDisabled("Press Generate to emit control code.");
               }
-
-              if (code.size() > 0)
-                ImGui::InputTextMultiline("##code", code.Buf.Data, (size_t)code.Buf.Capacity,
-                    ImVec2(-FLT_MIN, em * 12.0f), ImGuiInputTextFlags_ReadOnly);
+              ImGui::EndChild();
             }
           }
-          ImGui::EndChild();
-
-          ImGui::SameLine();
-
-          // Graph fills the remaining region to the right of the controls column.
-          ImGui::BeginChild("##NodeGraph", ImVec2(0.0f, 0.0f), ImGuiChildFlags_Borders);
-          {
-            ImGui::TextUnformatted("Data flow (drag between ports to connect):");
-            ShowDataFlowGraph(&app, show_random_time, show_breathing, &draft, &links, &next_link_id);
-          }
-          ImGui::EndChild();
         }
         ImGui::End();
       }

@@ -26,6 +26,93 @@ namespace ImGui
     ImNodes::EndNode();
   }
 
+  // Title-bar content for a renamable node: static label that becomes a focused text box while this
+  // node is the one being renamed. Lives inside BeginNodeTitleBar/EndNodeTitleBar.
+  static bool AppNodeTitleField(int id, char* name, int name_size, int* editing_node_id)
+  {
+    bool changed = false;
+
+    if (*editing_node_id == id)
+    {
+      ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
+
+      // Grab keyboard focus (and select-all) only on the first edit frame. Re-grabbing every frame
+      // would trap focus and defeat click-away-to-commit. One node renames at a time, so a single
+      // shared latch is enough.
+      static int focused_id = -1;
+      if (focused_id != id)
+      {
+        ImGui::SetKeyboardFocusHere();
+        focused_id = id;
+      }
+
+      ImGui::PushID(id);
+      changed = ImGui::InputText("##rename", name, (size_t)name_size,
+          ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll);
+      if (ImGui::IsItemDeactivated())   // Enter, Escape, or click-away ends the rename
+      {
+        *editing_node_id = -1;
+        focused_id = -1;
+      }
+      ImGui::PopID();
+    }
+    else
+    {
+      const char* label = (name && name[0]) ? name : "(unnamed)";
+
+      // Convey editability by color: the title is plain text at rest and only grows a text-field
+      // frame on hover, so hovering reveals it is an input. Clicking swaps in the real InputText.
+      // The resting title reserves the SAME footprint as that InputText -- width em*10, height
+      // GetFrameHeight() -- so the node does not resize when editing starts. The label is drawn by
+      // hand into that rect (clipped like an input) and a Dummy reserves the area; a Dummy is not an
+      // active widget, so dragging the title still moves the node. Hover is sampled from the previous
+      // frame so the frame paints *behind* the text; the one-frame latency is imperceptible.
+      static int hovered_title_id = -1;
+
+      const ImGuiStyle& style = ImGui::GetStyle();
+      const float w = ImGui::GetFontSize() * 10.0f;
+      const float h = ImGui::GetFrameHeight();
+      const ImVec2 pos = ImGui::GetCursorScreenPos();
+      const ImVec2 mn = pos;
+      const ImVec2 mx = ImVec2(pos.x + w, pos.y + h);
+      ImDrawList* dl = ImGui::GetWindowDrawList();
+
+      if (hovered_title_id == id)
+        dl->AddRectFilled(mn, mx, ImGui::GetColorU32(ImGuiCol_FrameBgHovered), style.FrameRounding);
+
+      dl->PushClipRect(mn, mx, true);
+      dl->AddText(ImVec2(pos.x + style.FramePadding.x, pos.y + style.FramePadding.y),
+                  ImGui::GetColorU32(ImGuiCol_Text), label);
+      dl->PopClipRect();
+
+      ImGui::Dummy(ImVec2(w, h));   // reserve the InputText footprint so the node size stays constant
+
+      const bool hovered = ImGui::IsItemHovered();
+      if (hovered)
+      {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_TextInput);
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+          *editing_node_id = id;
+      }
+      ImGui::SetItemTooltip("Click to rename");
+
+      hovered_title_id = hovered ? id : (hovered_title_id == id ? -1 : hovered_title_id);
+    }
+
+    return changed;
+  }
+
+  bool BeginAppNodeRenamable(int id, char* name, int name_size, int* editing_node_id)
+  {
+    IM_ASSERT(name != nullptr && editing_node_id != nullptr);
+
+    ImNodes::BeginNode(id);
+    ImNodes::BeginNodeTitleBar();
+    const bool changed = AppNodeTitleField(id, name, name_size, editing_node_id);
+    ImNodes::EndNodeTitleBar();
+    return changed;
+  }
+
   const char* AppFieldTypeName(ImGuiAppFieldType type)
   {
     switch (type)
@@ -62,8 +149,10 @@ namespace ImGui
   // Shared field-list editor used for both the persist and temp sets.
   static void EditAppFieldList(const char* list_label, ImVector<ImGuiAppFieldDesc>* fields)
   {
+    // TextDisabled (not SeparatorText) as the section label: a separator fills the content-region
+    // width, which would blow up the node when this editor is hosted inside an imnodes node.
     ImGui::PushID(list_label);
-    ImGui::SeparatorText(list_label);
+    ImGui::TextDisabled("%s", list_label);
 
     for (int i = 0; i < fields->Size; i++)
     {
@@ -101,6 +190,14 @@ namespace ImGui
     ImGui::PopID();
   }
 
+  void EditAppNodeDraftFields(ImGuiAppNodeDraft* draft)
+  {
+    IM_ASSERT(draft != nullptr);
+
+    EditAppFieldList("Persist", &draft->PersistFields);
+    EditAppFieldList("Temp", &draft->TempFields);
+  }
+
   void EditAppNodeDraft(ImGuiAppNodeDraft* draft)
   {
     IM_ASSERT(draft != nullptr);
@@ -108,8 +205,7 @@ namespace ImGui
     ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
     ImGui::InputText("Name", draft->Name, IM_ARRAYSIZE(draft->Name));
 
-    EditAppFieldList("Persist", &draft->PersistFields);
-    EditAppFieldList("Temp", &draft->TempFields);
+    EditAppNodeDraftFields(draft);
   }
 
   void DrawAppNodeDraft(const ImGuiAppNodeDraft* draft)
@@ -213,6 +309,100 @@ namespace ImGui
       return false;
     ImFileWrite(buf.c_str(), sizeof(char), (ImU64)buf.size(), fh);
     ImFileClose(fh);
+    return true;
+  }
+
+  // Append one draft as a "[Draft]" section to buf. Shared by the single- and multi-draft savers.
+  static void AppNodeWriteDraft(ImGuiTextBuffer* buf, const ImGuiAppNodeDraft* draft)
+  {
+    buf->appendf("[Draft]\n");
+    buf->appendf("Name=%s\n", draft->Name);
+    for (int i = 0; i < draft->PersistFields.Size; i++)
+    {
+      const ImGuiAppFieldDesc* f = &draft->PersistFields.Data[i];
+      buf->appendf("Persist=%s,%d,%d\n", f->Name, (int)f->Type, f->ArraySize);
+    }
+    for (int i = 0; i < draft->TempFields.Size; i++)
+    {
+      const ImGuiAppFieldDesc* f = &draft->TempFields.Data[i];
+      buf->appendf("Temp=%s,%d,%d\n", f->Name, (int)f->Type, f->ArraySize);
+    }
+  }
+
+  bool SaveAppNodeGraphMulti(const char* path, const ImVector<ImGuiAppNodeDraft>* drafts, const ImVector<ImGuiAppNodeLink>* links)
+  {
+    IM_ASSERT(path != nullptr && drafts != nullptr && links != nullptr);
+
+    ImGuiTextBuffer buf;
+    for (int i = 0; i < drafts->Size; i++)
+      AppNodeWriteDraft(&buf, &drafts->Data[i]);
+    for (int i = 0; i < links->Size; i++)
+      buf.appendf("Link=%d,%d,%d\n", links->Data[i].Id, links->Data[i].StartAttr, links->Data[i].EndAttr);
+
+    ImFileHandle fh = ImFileOpen(path, "wt");
+    if (fh == nullptr)
+      return false;
+    ImFileWrite(buf.c_str(), sizeof(char), (ImU64)buf.size(), fh);
+    ImFileClose(fh);
+    return true;
+  }
+
+  bool LoadAppNodeGraphMulti(const char* path, ImVector<ImGuiAppNodeDraft>* drafts, ImVector<ImGuiAppNodeLink>* links)
+  {
+    IM_ASSERT(path != nullptr && drafts != nullptr && links != nullptr);
+
+    size_t data_size = 0;
+    char* data = (char*)ImFileLoadToMemory(path, "rb", &data_size, 1); // +1 zero terminator
+    if (data == nullptr)
+      return false;
+
+    drafts->clear();
+    links->clear();
+
+    // "[Draft]" opens a new draft; the Name/Persist/Temp lines that follow apply to it. A file with
+    // no "[Draft]" header but Name/Persist lines (older single-draft format) still works: the first
+    // such line lazily opens draft 0.
+    ImGuiAppNodeDraft* cur = nullptr;
+    char* p = data;
+    while (*p)
+    {
+      char* eol = p;
+      while (*eol != 0 && *eol != '\n')
+        eol++;
+      const char saved = *eol;
+      *eol = 0;
+      if (eol > p && eol[-1] == '\r')   // text-mode writes \r\n; binary read keeps the \r -> trim it
+        eol[-1] = 0;
+
+      if (strncmp(p, "[Draft]", 7) == 0)
+      {
+        drafts->push_back(ImGuiAppNodeDraft());
+        cur = &drafts->Data[drafts->Size - 1];
+        cur->PersistFields.clear();
+        cur->TempFields.clear();
+      }
+      else if (strncmp(p, "Name=", 5) == 0)
+      {
+        if (cur == nullptr) { drafts->push_back(ImGuiAppNodeDraft()); cur = &drafts->Data[drafts->Size - 1]; cur->PersistFields.clear(); cur->TempFields.clear(); }
+        ImStrncpy(cur->Name, p + 5, IM_ARRAYSIZE(cur->Name));
+      }
+      else if (cur != nullptr && strncmp(p, "Persist=", 8) == 0)
+        AppNodeParseField(&cur->PersistFields, p + 8);
+      else if (cur != nullptr && strncmp(p, "Temp=", 5) == 0)
+        AppNodeParseField(&cur->TempFields, p + 5);
+      else if (strncmp(p, "Link=", 5) == 0)
+      {
+        ImGuiAppNodeLink l;
+        if (sscanf(p + 5, "%d,%d,%d", &l.Id, &l.StartAttr, &l.EndAttr) == 3)
+          links->push_back(l);
+      }
+
+      if (saved == 0)
+        break;
+      p = eol + 1;
+    }
+
+    IM_FREE(data);
     return true;
   }
 

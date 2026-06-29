@@ -134,6 +134,14 @@ namespace ImGui
   IMGUI_API void BeginAppNode(int id, const char* title);
   IMGUI_API void EndAppNode();
 
+  // Renamable node scaffold: the title bar shows *name and turns into an inline text box on
+  // double-click (list-view rename). Commits on Enter or focus loss, cancels on Escape. *editing_node_id
+  // is caller-owned single-slot state holding the id of the node being renamed (or -1 for none); the
+  // helper sets it on double-click and clears it when the edit ends. Returns true if *name changed this
+  // frame. Pair with EndAppNode(). imnodes suppresses node-drag while the box is active, so typing and
+  // text-selection drags do not move the node.
+  IMGUI_API bool BeginAppNodeRenamable(int id, char* name, int name_size, int* editing_node_id);
+
   // Render every reflected field of an aggregate as read-only labelled rows in the current node.
   template <typename T>
   inline void DrawAppNodeFields(const T* data)
@@ -222,6 +230,10 @@ namespace ImGui
   // Inspector UI: rename the draft and add/remove/edit its persist and temp fields.
   IMGUI_API void EditAppNodeDraft(ImGuiAppNodeDraft* draft);
 
+  // Just the persist/temp field editors (no Name input). Used where the name is edited elsewhere --
+  // e.g. inside a renamable node title -- so the body would otherwise show a duplicate Name field.
+  IMGUI_API void EditAppNodeDraftFields(ImGuiAppNodeDraft* draft);
+
   // Render a draft's fields as read-only node rows (no reflection: the type does not exist yet).
   IMGUI_API void DrawAppNodeDraft(const ImGuiAppNodeDraft* draft);
 }
@@ -250,6 +262,12 @@ namespace ImGui
   // Persist / restore a draft and its links as imgui-style text. Return false on file error.
   IMGUI_API bool SaveAppNodeGraph(const char* path, const ImGuiAppNodeDraft* draft, const ImVector<ImGuiAppNodeLink>* links);
   IMGUI_API bool LoadAppNodeGraph(const char* path, ImGuiAppNodeDraft* draft, ImVector<ImGuiAppNodeLink>* links);
+
+  // Multi-draft variants: persist / restore a whole graph of drafts plus its links. Same text
+  // format as the single-draft pair -- each draft is one "[Draft]" section -- so a single-draft
+  // file loads as a one-element vector and round-trips. *drafts is cleared before loading.
+  IMGUI_API bool SaveAppNodeGraphMulti(const char* path, const ImVector<ImGuiAppNodeDraft>* drafts, const ImVector<ImGuiAppNodeLink>* links);
+  IMGUI_API bool LoadAppNodeGraphMulti(const char* path, ImVector<ImGuiAppNodeDraft>* drafts, ImVector<ImGuiAppNodeLink>* links);
 }
 
 //-----------------------------------------------------------------------------
