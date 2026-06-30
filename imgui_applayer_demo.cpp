@@ -245,8 +245,18 @@ namespace
   // so there is no "App" container node. Seed one window + one control to show the two pillars at once.
   void SeedAppGraph(ImGuiAppGraph* graph)
   {
-    ImGui::AppGraphAddNode(graph, ImGuiAppNodeKind_Window,  "MainWindow");
-    ImGui::AppGraphAddNode(graph, ImGuiAppNodeKind_Control, "NewControl");
+    // Explicit positions clear to the RIGHT of the live layer master column (which packs at x ~40..560), so the
+    // default window + control are visible and never sit behind the mirrored layer stack. Set HasGridPos so it
+    // sticks.
+    ImGuiAppNode* win  = ImGui::AppGraphAddNode(graph, ImGuiAppNodeKind_Window,  "MainWindow");
+    win->GridPos = ImVec2(640.0f, 60.0f);
+    win->HasGridPos = true;
+    win->_NeedsPlace = true;
+
+    ImGuiAppNode* ctrl = ImGui::AppGraphAddNode(graph, ImGuiAppNodeKind_Control, "NewControl");
+    ctrl->GridPos = ImVec2(640.0f, 240.0f);
+    ctrl->HasGridPos = true;
+    ctrl->_NeedsPlace = true;
   }
 
   // "+ Add node" palette: layers, windows, sidebars, controls -- the pieces that compose the app. Builtin
@@ -365,6 +375,12 @@ namespace
     bool ToggleCode;
     bool SetShowLive;   // "Show live mirror" checkbox changed this frame
     bool ShowLive;      // its captured value
+    bool Undo;          // undo / redo / tidy edit-intents (applied in OnUpdate)
+    bool Redo;
+    bool Tidy;
+    bool Diff;          // diff current graph's codegen vs the saved-on-disk graph -> clipboard
+    bool HistGoto;      // time-travel scrubber moved this frame
+    int  HistIndex;     // target snapshot index
   };
   struct ToolbarControl : ImGuiAppControl<ToolbarData, ToolbarTempData>
   {
@@ -404,6 +420,37 @@ namespace
       {
         doc->ShowLive = temp_data->ShowLive;
       }
+      if (temp_data->Undo)
+      {
+        ImGui::AppGraphUndo(&doc->Graph);
+      }
+      if (temp_data->Redo)
+      {
+        ImGui::AppGraphRedo(&doc->Graph);
+      }
+      if (temp_data->Tidy)
+      {
+        ImGui::AppGraphAutoLayout(&doc->Graph, doc->ShowLive);
+      }
+      if (temp_data->HistGoto)
+      {
+        ImGui::AppGraphHistoryGoto(&doc->Graph, temp_data->HistIndex);
+      }
+      if (temp_data->Diff)
+      {
+        ImGuiAppGraph saved;
+        if (ImGui::LoadAppGraph(doc->GraphPath, &saved))
+        {
+          ImGuiTextBuffer d;
+          ImGui::AppGraphDiffCode(&saved, &doc->Graph, &d);
+          ImGui::SetClipboardText(d.c_str());
+          ImFormatString(doc->WriteMsg, IM_ARRAYSIZE(doc->WriteMsg), "diff vs saved -> clipboard");
+        }
+        else
+        {
+          ImFormatString(doc->WriteMsg, IM_ARRAYSIZE(doc->WriteMsg), "no saved graph to diff (Save first)");
+        }
+      }
     }
 
     virtual void OnRender(const ToolbarData* data, ToolbarTempData* temp_data) const override final
@@ -429,6 +476,37 @@ namespace
         }
 
         EditorToolSep(em);
+        ImGui::BeginDisabled(!ImGui::AppGraphCanUndo(&doc->Graph));
+        temp_data->Undo = ImGui::Button("Undo");
+        ImGui::EndDisabled();
+        ImGui::SetItemTooltip("Undo (Ctrl+Z)");
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!ImGui::AppGraphCanRedo(&doc->Graph));
+        temp_data->Redo = ImGui::Button("Redo");
+        ImGui::EndDisabled();
+        ImGui::SetItemTooltip("Redo (Ctrl+Y)");
+        ImGui::SameLine();
+        temp_data->Tidy = ImGui::Button("Tidy");
+        ImGui::SetItemTooltip("Auto-layout the graph as a containment tree (L)");
+
+        // Time-travel scrubber: drag across the undo history to replay graph states live.
+        const int hist_count  = ImGui::AppGraphHistoryCount(&doc->Graph);
+        const int hist_cursor = ImGui::AppGraphHistoryCursor(&doc->Graph);
+        temp_data->HistGoto = false;
+        if (hist_count > 1)
+        {
+          ImGui::SameLine();
+          ImGui::SetNextItemWidth(em * 8.0f);
+          int idx = hist_cursor;
+          if (ImGui::SliderInt("##history", &idx, 0, hist_count - 1, "t-%d"))
+          {
+            temp_data->HistGoto  = true;
+            temp_data->HistIndex = idx;
+          }
+          ImGui::SetItemTooltip("Time-travel: scrub %d undo states", hist_count);
+        }
+
+        EditorToolSep(em);
         temp_data->Save = ImGui::Button("Save");
         ImGui::SetItemTooltip("Save graph -> %s", doc->GraphPath);
         ImGui::SameLine();
@@ -438,6 +516,9 @@ namespace
         EditorToolSep(em);
         temp_data->WriteHeader = ImGui::Button("Write .h");
         ImGui::SetItemTooltip("Write whole-graph C++ -> %s", doc->HeaderPath);
+        ImGui::SameLine();
+        temp_data->Diff = ImGui::Button("Diff");
+        ImGui::SetItemTooltip("Diff generated C++ vs the saved graph -> clipboard");
         ImGui::SameLine();
         if (code_open)
         {
@@ -579,6 +660,7 @@ namespace
     ImGuiTextBuffer CodeText;                // generated C++ for the selected node
     bool            HasCode;                 // a node is selected and code was generated
     char            CodeName[IM_LABEL_SIZE]; // selected node's draft name (for the panel title)
+    ImVector<ImGui::ImGuiAppGraphIssue> Issues;  // validation problems, recomputed while the panel is open
   };
   // TempData: raw input recorded by OnRender (the only place ImGui item geometry exists) and consumed by OnUpdate.
   // OnRender performs no logic and mutates no state -- it just records what the user did, exactly like the demo's
@@ -655,6 +737,13 @@ namespace
           ImStrncpy(data->CodeName, seln->Draft.Name, sizeof(data->CodeName));
           data->HasCode = true;
         }
+      }
+
+      // Validation problems for the Problems tab (only while the panel is open -- it scans the whole graph).
+      data->Issues.clear();
+      if (doc->CodeH > 0.0f)
+      {
+        ImGui::AppGraphValidate(&doc->Graph, &data->Issues);
       }
     }
 
@@ -754,7 +843,7 @@ namespace
                 if (data->CodeText.size() > 0)
                 {
                   ImGui::SameLine();
-                  if (ImGui::SmallButton("Copy"))
+                  if (ImGui::Button("Copy"))
                   {
                     ImGui::SetClipboardText(data->CodeText.c_str());
                   }
@@ -779,6 +868,49 @@ namespace
                   if (g_AppCodeFont)
                   {
                     ImGui::PopFont();
+                  }
+                }
+                ImGui::EndTabItem();
+              }
+              // Preview ("Play"): render the selected control's fields as a live mock UI.
+              if (ImGui::BeginTabItem("Preview"))
+              {
+                ImGui::AppGraphRenderMockPanel(graph, selection);
+                ImGui::EndTabItem();
+              }
+              // Problems: validation findings. The tab label carries the count; clicking a row reveals the node.
+              char problems_label[32];
+              if (data->Issues.Size > 0)
+              {
+                ImFormatString(problems_label, IM_ARRAYSIZE(problems_label), "Problems (%d)###problems", data->Issues.Size);
+              }
+              else
+              {
+                ImStrncpy(problems_label, "Problems###problems", IM_ARRAYSIZE(problems_label));
+              }
+              if (ImGui::BeginTabItem(problems_label))
+              {
+                if (data->Issues.Size == 0)
+                {
+                  ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.45f, 1.0f), "No problems found.");
+                }
+                else
+                {
+                  for (int i = 0; i < data->Issues.Size; i++)
+                  {
+                    const ImGui::ImGuiAppGraphIssue& it = data->Issues.Data[i];
+                    const ImVec4 col = (it.Severity >= 2) ? ImVec4(0.92f, 0.45f, 0.45f, 1.0f) : ImVec4(0.92f, 0.80f, 0.40f, 1.0f);
+                    ImGui::PushID(i);
+                    ImGui::PushStyleColor(ImGuiCol_Text, col);
+                    const char* dot = (it.Severity >= 2) ? "[x] " : "[!] ";
+                    char row[288];
+                    ImFormatString(row, IM_ARRAYSIZE(row), "%s%s", dot, it.Text);
+                    if (ImGui::Selectable(row) && it.NodeId >= 0)
+                    {
+                      selection = it.NodeId;   // reveal + select the offending node in tree + canvas
+                    }
+                    ImGui::PopStyleColor();
+                    ImGui::PopID();
                   }
                 }
                 ImGui::EndTabItem();
@@ -909,6 +1041,10 @@ namespace ImGui
       if (!imnodes_ready)
       {
         ImNodes::CreateContext();
+        // Ctrl adds to the selection (so box-select and Ctrl-click compose); left-drag on empty canvas still
+        // rubber-bands. Panning stays on the middle mouse (imnodes' default AltMouseButton), leaving right-click
+        // free for the canvas context menu.
+        ImNodes::GetIO().MultipleSelectModifier.Modifier = &ImGui::GetIO().KeyCtrl;
         imnodes_ready = true;
       }
 

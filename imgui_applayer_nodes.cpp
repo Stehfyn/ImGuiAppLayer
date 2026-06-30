@@ -125,6 +125,7 @@ namespace ImGui
     case ImGuiAppFieldType_Vec2:   return "ImVec2";
     case ImGuiAppFieldType_Vec4:   return "ImVec4";
     case ImGuiAppFieldType_String: return "char";
+    case ImGuiAppFieldType_Struct: return "struct";
     default:                       return "float";
     }
   }
@@ -172,6 +173,31 @@ namespace ImGui
     return clicked;
   }
 
+  // Compact reorder button: a self-drawn triangle (up or down) over a hover/active disc, square and row-height.
+  // `enabled` dims the glyph and swallows the click at a list end -- no greyed-out ImGui::ArrowButton chrome.
+  static bool AppRowReorderButton(const char* str_id, bool up, bool enabled)
+  {
+    const float sz = ImGui::GetFrameHeight();
+    const ImVec2 pos = ImGui::GetCursorScreenPos();
+    const bool clicked = ImGui::InvisibleButton(str_id, ImVec2(sz, sz)) && enabled;
+    const bool hovered = enabled && ImGui::IsItemHovered();
+    const bool held = enabled && ImGui::IsItemActive();
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 c = ImVec2(pos.x + sz * 0.5f, pos.y + sz * 0.5f);
+    if (hovered || held)
+      dl->AddCircleFilled(c, sz * 0.5f, ImGui::GetColorU32(held ? ImGuiCol_ButtonActive : ImGuiCol_ButtonHovered));
+
+    const ImU32 col = ImGui::GetColorU32(ImGuiCol_Text, !enabled ? 0.28f : (hovered || held) ? 1.0f : 0.62f);
+    const float a = sz * 0.20f;
+    if (up)
+      dl->AddTriangleFilled(ImVec2(c.x - a, c.y + a * 0.7f), ImVec2(c.x + a, c.y + a * 0.7f), ImVec2(c.x, c.y - a * 0.85f), col);
+    else
+      dl->AddTriangleFilled(ImVec2(c.x - a, c.y - a * 0.7f), ImVec2(c.x + a, c.y - a * 0.7f), ImVec2(c.x, c.y + a * 0.85f), col);
+    if (hovered) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    return clicked;
+  }
+
   //-----------------------------------------------------------------------------
   // [SECTION] Blender-style field widgets (node body)
   // Flat, rounded, hover-lit fields. Text: left-aligned, click to edit in place. Enum: centered value with
@@ -202,6 +228,64 @@ namespace ImGui
     dl->AddRectFilled(mn, mx, editing ? kBlFillEdit : (hovered ? kBlFillHover : kBlFill), r);
     dl->AddRect(mn, mx, kBlBorder, r);
     return r;
+  }
+
+  // Flat rounded "add" pill: a self-drawn + glyph and label on a hover-lit rounded fill. Replaces ImGui::SmallButton
+  // for the "Add field"/"Add binding" affordances so they read as soft pills, not raised system buttons.
+  static bool AppBlAddPill(const char* str_id, const char* label)
+  {
+    const float h = ImGui::GetFrameHeight();
+    const float em = ImGui::GetFontSize();
+    const float pad = em * 0.45f;
+    const float plus_w = em * 0.85f;
+    const ImVec2 ts = ImGui::CalcTextSize(label);
+    const float w = pad + plus_w + ts.x + pad;
+    const ImVec2 mn = ImGui::GetCursorScreenPos();
+    const ImVec2 mx(mn.x + w, mn.y + h);
+
+    const bool clicked = ImGui::InvisibleButton(str_id, ImVec2(w, h));
+    const bool hovered = ImGui::IsItemHovered();
+    const bool held = ImGui::IsItemActive();
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float r = h * 0.28f;
+    dl->AddRectFilled(mn, mx, held ? kBlFillEdit : hovered ? kBlFillHover : kBlFill, r);
+    dl->AddRect(mn, mx, kBlBorder, r);
+
+    const ImU32 col = ImGui::GetColorU32(ImGuiCol_Text, hovered || held ? 1.0f : 0.8f);
+    const ImVec2 pc(mn.x + pad + plus_w * 0.5f, (mn.y + mx.y) * 0.5f);
+    const float a = em * 0.28f;
+    const float th = ImMax(1.0f, IM_ROUND(em * 0.09f));
+    dl->AddLine(ImVec2(pc.x - a, pc.y), ImVec2(pc.x + a, pc.y), col, th);
+    dl->AddLine(ImVec2(pc.x, pc.y - a), ImVec2(pc.x, pc.y + a), col, th);
+    dl->AddText(ImVec2(mn.x + pad + plus_w, mn.y + (h - ts.y) * 0.5f), col, label);
+    if (hovered) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    return clicked;
+  }
+
+  // Flat square toggle chip: accent-filled when on, recessed when off, with a centered label. Self-drawn so the
+  // kind-filter chips read as flat swatches instead of raised ImGui::SmallButtons. Returns true on click.
+  static bool AppBlToggleChip(const char* str_id, const char* label, bool on, ImU32 accent)
+  {
+    const float sz = ImGui::GetFrameHeight();
+    const ImVec2 mn = ImGui::GetCursorScreenPos();
+    const ImVec2 mx(mn.x + sz, mn.y + sz);
+    const bool clicked = ImGui::InvisibleButton(str_id, ImVec2(sz, sz));
+    const bool hovered = ImGui::IsItemHovered();
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float r = sz * 0.22f;
+    ImU32 fill = on ? accent : kBlFill;
+    if (hovered)
+      fill = on ? accent : kBlFillHover;
+    dl->AddRectFilled(mn, mx, fill, r);
+    dl->AddRect(mn, mx, on ? (accent & 0x00FFFFFF) | 0xFF000000 : kBlBorder, r);
+
+    const ImU32 tc = on ? IM_COL32(20, 20, 20, 255) : ImGui::GetColorU32(ImGuiCol_Text, hovered ? 0.9f : 0.55f);
+    const ImVec2 ts = ImGui::CalcTextSize(label);
+    dl->AddText(ImVec2(mn.x + (sz - ts.x) * 0.5f, mn.y + (sz - ts.y) * 0.5f), tc, label);
+    if (hovered) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    return clicked;
   }
 
   static void AppBlText(ImDrawList* dl, ImVec2 mn, ImVec2 mx, const char* text, bool centered)
@@ -317,6 +401,13 @@ namespace ImGui
         if (ImGui::Selectable(name_of(i), i == *v)) { *v = i; changed = true; }
       ImGui::EndCombo();
     }
+    // Hover-scrub: roll the mouse wheel over the (closed) combo to step the value without opening it.
+    const float wheel = ImGui::GetIO().MouseWheel;
+    if (wheel != 0.0f && count > 0 && ImGui::IsItemHovered())
+    {
+      *v = ((*v >= 0 ? *v : 0) + (wheel > 0.0f ? 1 : count - 1)) % count;
+      changed = true;
+    }
     ImGui::PopID();
 
     ImGui::PopStyleVar(2);
@@ -388,14 +479,75 @@ namespace ImGui
       g_bl_drag_id = 0;
     }
 
+    // Hover-scrub: roll the wheel over the field to step the value (Shift = x10).
+    const float wheel = ImGui::GetIO().MouseWheel;
+    if (wheel != 0.0f && hovered && !active)
+    {
+      *v = ImClamp(*v + (int)wheel * (ImGui::GetIO().KeyShift ? 10 : 1), vmin, vmax);
+      changed = true;
+    }
     if (hovered && !active) { AppBlStepArrows(dl, mn, mx, arrow_w); ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW); }
     char lbl[32]; ImFormatString(lbl, IM_ARRAYSIZE(lbl), "%d", *v);
     AppBlText(dl, mn, mx, lbl, true);
     return changed;
   }
 
-  // Shared field-list editor used for both the persist and temp sets.
-  static void EditAppFieldList(const char* list_label, ImVector<ImGuiAppFieldDesc>* fields)
+  // Type selector for one field (Bl enum + String size / Struct picker). Caller positions the cursor; name is
+  // edited elsewhere. `g` populates the struct picker. Shared by the field-list rows and the Field node body.
+  static void EditAppFieldTypeControls(ImGuiAppFieldDesc* f, float type_w, const ImGuiAppGraph* g)
+  {
+    int t = (int)f->Type;
+    if (AppBlEnum("##type", type_w, &t, &AppFieldTypeName, ImGuiAppFieldType_COUNT))
+    {
+      f->Type = (ImGuiAppFieldType)t;
+    }
+    if (f->Type == ImGuiAppFieldType_String)
+    {
+      if (f->ArraySize <= 0)
+      {
+        f->ArraySize = 128;
+      }
+      ImGui::SameLine();
+      AppBlDragInt("##size", ImGui::GetFontSize() * 4.0f, &f->ArraySize, 1, 65536);
+    }
+    else if (f->Type == ImGuiAppFieldType_Struct)
+    {
+      ImGui::SameLine();
+      const float r = ImGui::GetFrameHeight() * 0.28f;
+      ImGui::PushStyleColor(ImGuiCol_FrameBg,        kBlFill);
+      ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, kBlFillHover);
+      ImGui::PushStyleColor(ImGuiCol_Text,           kBlText);
+      ImGui::PushStyleColor(ImGuiCol_PopupBg,        kBlFillEdit);
+      ImGui::PushStyleColor(ImGuiCol_HeaderHovered,  kBlFillHover);
+      ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, r);
+      ImGui::SetNextItemWidth(ImGui::GetFontSize() * 8.0f);
+      if (ImGui::BeginCombo("##stype", f->StructType[0] ? f->StructType : "<struct>", ImGuiComboFlags_NoArrowButton))
+      {
+        if (g != nullptr)
+        {
+          for (int si = 0; si < g->Nodes.Size; si++)
+          {
+            const ImGuiAppNode* sn = &g->Nodes.Data[si];
+            if (sn->Kind != ImGuiAppNodeKind_Struct || sn->IsLive)
+            {
+              continue;
+            }
+            if (ImGui::Selectable(sn->Draft.Name, strcmp(sn->Draft.Name, f->StructType) == 0))
+            {
+              ImStrncpy(f->StructType, sn->Draft.Name, IM_ARRAYSIZE(f->StructType));
+            }
+          }
+        }
+        ImGui::EndCombo();
+      }
+      ImGui::PopStyleVar();
+      ImGui::PopStyleColor(5);
+    }
+  }
+
+  // Shared field-list editor used for both the persist and temp sets. `g` (optional) populates the struct-type
+  // picker for ImGuiAppFieldType_Struct fields with the graph's Struct node names.
+  static void EditAppFieldList(const char* list_label, ImVector<ImGuiAppFieldDesc>* fields, const ImGuiAppGraph* g = nullptr)
   {
     // TextDisabled (not SeparatorText) as the section label: a separator fills the content-region
     // width, which would blow up the node when this editor is hosted inside an imnodes node.
@@ -411,20 +563,26 @@ namespace ImGui
       AppBlInputText("##name", f->Name, IM_ARRAYSIZE(f->Name), em * 8.0f);
 
       ImGui::SameLine();
-      int t = (int)f->Type;
-      if (AppBlEnum("##type", em * 5.0f, &t, &AppFieldTypeName, ImGuiAppFieldType_COUNT))
-        f->Type = (ImGuiAppFieldType)t;
+      EditAppFieldTypeControls(f, em * 5.0f, g);
 
-      // String fields carry a buffer length -> a Blender drag-int for char[ArraySize].
-      if (f->Type == ImGuiAppFieldType_String)
+      // Reorder: move this field up / down (swap with its neighbor). Member order == generated struct layout.
+      ImGui::SameLine();
+      if (AppRowReorderButton("##up", true, i > 0))
       {
-        if (f->ArraySize <= 0) f->ArraySize = 128;
-        ImGui::SameLine();
-        AppBlDragInt("##size", em * 4.0f, &f->ArraySize, 1, 65536);
+        const ImGuiAppFieldDesc tmp = fields->Data[i - 1];
+        fields->Data[i - 1] = fields->Data[i];
+        fields->Data[i] = tmp;
+      }
+      ImGui::SameLine(0.0f, 2.0f);
+      if (AppRowReorderButton("##down", false, i < fields->Size - 1))
+      {
+        const ImGuiAppFieldDesc tmp = fields->Data[i + 1];
+        fields->Data[i + 1] = fields->Data[i];
+        fields->Data[i] = tmp;
       }
 
       ImGui::SameLine();
-      if (AppRowDeleteButton("##del"))
+      if (AppRowDeleteButton("X"))   // id doubles as the test handle for the row-delete affordance
       {
         AppNodeDraftRemoveField(fields, i);
         ImGui::PopID();
@@ -435,7 +593,7 @@ namespace ImGui
       ImGui::PopID();
     }
 
-    if (ImGui::SmallButton("Add field"))
+    if (AppBlAddPill("Add field", "Add field"))
       AppNodeDraftAddField(fields, "field", ImGuiAppFieldType_Float);
 
     ImGui::PopID();
@@ -527,10 +685,14 @@ namespace ImGui
     ImGuiAppFieldDesc f;
     int type = ImGuiAppFieldType_Float;
     int array_size = f.ArraySize;
-    if (sscanf(line, "%255[^,],%d,%d", f.Name, &type, &array_size) >= 1)
+    char struct_type[256] = "";
+    const int got = sscanf(line, "%255[^,],%d,%d,%255[^\n]", f.Name, &type, &array_size, struct_type);
+    if (got >= 1)
     {
       f.Type = (ImGuiAppFieldType)type;
       f.ArraySize = array_size;
+      if (got >= 4)
+        ImStrncpy(f.StructType, struct_type, IM_ARRAYSIZE(f.StructType));
       fields->push_back(f);
     }
   }
@@ -545,12 +707,12 @@ namespace ImGui
     for (int i = 0; i < draft->PersistFields.Size; i++)
     {
       const ImGuiAppFieldDesc* f = &draft->PersistFields.Data[i];
-      buf.appendf("Persist=%s,%d,%d\n", f->Name, (int)f->Type, f->ArraySize);
+      buf.appendf("Persist=%s,%d,%d,%s\n", f->Name, (int)f->Type, f->ArraySize, f->StructType);
     }
     for (int i = 0; i < draft->TempFields.Size; i++)
     {
       const ImGuiAppFieldDesc* f = &draft->TempFields.Data[i];
-      buf.appendf("Temp=%s,%d,%d\n", f->Name, (int)f->Type, f->ArraySize);
+      buf.appendf("Temp=%s,%d,%d,%s\n", f->Name, (int)f->Type, f->ArraySize, f->StructType);
     }
     for (int i = 0; i < links->Size; i++)
       buf.appendf("Link=%d,%d,%d\n", links->Data[i].Id, links->Data[i].StartAttr, links->Data[i].EndAttr);
@@ -571,12 +733,12 @@ namespace ImGui
     for (int i = 0; i < draft->PersistFields.Size; i++)
     {
       const ImGuiAppFieldDesc* f = &draft->PersistFields.Data[i];
-      buf->appendf("Persist=%s,%d,%d\n", f->Name, (int)f->Type, f->ArraySize);
+      buf->appendf("Persist=%s,%d,%d,%s\n", f->Name, (int)f->Type, f->ArraySize, f->StructType);
     }
     for (int i = 0; i < draft->TempFields.Size; i++)
     {
       const ImGuiAppFieldDesc* f = &draft->TempFields.Data[i];
-      buf->appendf("Temp=%s,%d,%d\n", f->Name, (int)f->Type, f->ArraySize);
+      buf->appendf("Temp=%s,%d,%d,%s\n", f->Name, (int)f->Type, f->ArraySize, f->StructType);
     }
   }
 
@@ -733,9 +895,17 @@ namespace ImGui
     AppSanitizeIdentifier(name, IM_ARRAYSIZE(name), f->Name);
 
     if (f->Type == ImGuiAppFieldType_String)
+    {
       out->appendf("  char %s[%d];\n", name, f->ArraySize > 0 ? f->ArraySize : 128);
+    }
+    else if (f->Type == ImGuiAppFieldType_Struct)
+    {
+      out->appendf("  %s %s;\n", f->StructType[0] ? f->StructType : "void* /* set struct type */", name);
+    }
     else
+    {
       out->appendf("  %s %s;\n", AppFieldTypeName(f->Type), name);
+    }
   }
 
   void GenerateAppControlCode(const ImGuiAppNodeDraft* draft, ImGuiTextBuffer* out)
@@ -1137,6 +1307,54 @@ namespace ImGui
     return n;
   }
 
+  static int AppNodePortByName(const ImGuiAppNode* n, const char* name);   // fwd
+
+  // Replace the AUTHORED graph with a starter template (live mirror nodes re-reconcile next frame). 0 = empty app
+  // (Task+Window layers + a window), 1 = single-window + control, 2 = struct producer + a control consuming it.
+  static void AppGraphLoadTemplate(ImGuiAppGraph* g, int which)
+  {
+    ImVector<int> authored;
+    for (int i = 0; i < g->Nodes.Size; i++)
+    {
+      if (!g->Nodes.Data[i].IsLive)
+        authored.push_back(g->Nodes.Data[i].Id);
+    }
+    for (int i = 0; i < authored.Size; i++)
+    {
+      AppGraphRemoveNode(g, authored.Data[i]);
+    }
+    g->Bindings.clear();
+
+    if (which == 0 || which == 1)
+    {
+      AppGraphAddNode(g, ImGuiAppNodeKind_Layer, "WindowLayer")->LayerType = ImGuiAppLayerType_Window;
+      AppGraphAddNode(g, ImGuiAppNodeKind_Window, "MainWindow");
+      if (which == 1)
+        AppGraphAddNode(g, ImGuiAppNodeKind_Control, "MainControl");
+    }
+    else if (which == 2)
+    {
+      const int struct_id = AppGraphAddNode(g, ImGuiAppNodeKind_Struct, "SharedData")->Id;
+      const int ctrl_id   = AppGraphAddNode(g, ImGuiAppNodeKind_Control, "Consumer")->Id;
+      const ImGuiAppNode* s = AppGraphFindNode(g, struct_id);
+      const ImGuiAppNode* c = AppGraphFindNode(g, ctrl_id);
+      if (s != nullptr && c != nullptr)
+      {
+        const int sout = AppNodePortByName(s, "type");
+        const int cin  = AppNodePortByName(c, "deps");
+        if (sout != 0 && cin != 0)
+        {
+          ImGuiAppNodeLink l;
+          l.Id = AppGraphAllocId(g);
+          l.StartAttr = sout;
+          l.EndAttr = cin;
+          l.Kind = ImGuiAppEdgeKind_Data;
+          g->Links.push_back(l);
+        }
+      }
+    }
+  }
+
   // Duplicate a design node (Control / Window / Sidebar): clone its authored props into a fresh node, offset from
   // the source. Layers (one-per-type) and live mirror nodes are not duplicable.
   static ImGuiAppNode* AppGraphDuplicateNode(ImGuiAppGraph* g, const ImGuiAppNode* src)
@@ -1166,6 +1384,12 @@ namespace ImGui
   static int AppGraphParentOf(const ImGuiAppGraph* g, int child_node_id);   // fwd
   static const ImGuiAppNode* AppGraphFindNodeConst(const ImGuiAppGraph* g, int node_id);   // fwd
   static void AppNodeBaseName(const ImGuiAppNode* n, char* out, size_t out_size);   // fwd
+  static void AppGraphCopySelection(const ImGuiAppGraph* g, const ImVector<int>& roots);   // fwd
+  static int  AppGraphPasteClipboard(ImGuiAppGraph* g);   // fwd
+  static bool AppGraphClipboardHasData();   // fwd
+  static void AppGraphCollectSubtree(const ImGuiAppGraph* g, int root_id, ImVector<int>* ids);   // fwd
+  static int  AppNodeFirstPortKind(const ImGuiAppNode* n, ImGuiAppPortKind kind);   // fwd
+  static bool AppIdInSet(const ImVector<int>& s, int id);   // fwd
 
   // PersistData and TempData are both structs. A "field list" is one of them on any owner -- list 0 = PersistData
   // (Struct nodes + Control), list 1 = TempData (Control only). Everything below is generic over (owner, list).
@@ -1619,7 +1843,7 @@ namespace ImGui
     }
     if (remove >= 0)
       AppNodeRemoveCommand(n, remove);
-    if (ImGui::Button("+ Command"))
+    if (AppBlAddPill("Add command", "Command"))
       AppNodeAddCommandUnique(n, "NewCommand");
   }
 
@@ -1686,7 +1910,7 @@ namespace ImGui
     }
     if (first_available == nullptr)
       ImGui::BeginDisabled();
-    if (ImGui::Button("+ Command") && first_available != nullptr)
+    if (AppBlAddPill("Add command", "Command") && first_available != nullptr)
       AppNodeAddCommand(n, first_available->Name);
     if (first_available == nullptr)
     {
@@ -1728,6 +1952,10 @@ namespace ImGui
         g->Links.erase(g->Links.Data + li);
       }
     }
+    for (int si = g->Selection.Size - 1; si >= 0; si--)
+      if (g->Selection.Data[si] == node_id)
+        g->Selection.erase(g->Selection.Data + si);
+
     g->Nodes.erase(n);   // surviving nodes/ports/links keep their ids; ids are never reused
   }
 
@@ -1868,6 +2096,45 @@ namespace ImGui
     return AppGraphResolveLink(g, start_port, end_port, &s, &d, &k, err, err_size);
   }
 
+  // Programmatically connect two ports (pin-drag-to-create auto-wire). Validates + orders via the same resolver
+  // as interactive linking; returns true if a link was added.
+  static bool AppGraphTryConnect(ImGuiAppGraph* g, int port_a, int port_b)
+  {
+    int s = 0, d = 0; ImGuiAppEdgeKind k = ImGuiAppEdgeKind_Data;
+    char err[8];
+    if (!AppGraphResolveLink(g, port_a, port_b, &s, &d, &k, err, IM_ARRAYSIZE(err)))
+      return false;
+    ImGuiAppNodeLink link;
+    link.Id = AppGraphAllocId(g);
+    link.StartAttr = s;
+    link.EndAttr = d;
+    link.Kind = k;
+    g->Links.push_back(link);
+    return true;
+  }
+
+  // Field-type inference: when a Struct producer's output (src) is wired into a consumer's input (dst), fill the
+  // first struct-typed field on the consumer that still has no type with the producer struct's name. Only ever
+  // completes an unset type -- never overwrites a choice the user already made.
+  static void AppInferStructFieldType(ImGuiAppGraph* g, int src_port, int dst_port)
+  {
+    ImGuiAppNode* prod = AppGraphFindNode(g, AppGraphPortOwnerId(g, src_port));
+    ImGuiAppNode* cons = AppGraphFindNode(g, AppGraphPortOwnerId(g, dst_port));
+    if (prod == nullptr || cons == nullptr || prod->Kind != ImGuiAppNodeKind_Struct)
+      return;
+
+    char tn[IM_LABEL_SIZE];
+    AppNodeBaseName(prod, tn, IM_ARRAYSIZE(tn));
+    ImVector<ImGuiAppFieldDesc>* lists[2] = { &cons->Draft.PersistFields, &cons->Draft.TempFields };
+    for (int l = 0; l < 2; l++)
+      for (int f = 0; f < lists[l]->Size; f++)
+        if (lists[l]->Data[f].Type == ImGuiAppFieldType_Struct && lists[l]->Data[f].StructType[0] == 0)
+        {
+          ImStrncpy(lists[l]->Data[f].StructType, tn, IM_ARRAYSIZE(lists[l]->Data[f].StructType));
+          return;
+        }
+  }
+
   bool CaptureAppGraphLinks(ImGuiAppGraph* g, char* err, int err_size)
   {
     IM_ASSERT(g != nullptr);
@@ -1886,6 +2153,8 @@ namespace ImGui
         link.EndAttr = d;
         link.Kind = k;
         g->Links.push_back(link);
+        if (k == ImGuiAppEdgeKind_Data)
+          AppInferStructFieldType(g, s, d);   // wiring a struct producer in fills an unset struct field type
         if (k == ImGuiAppEdgeKind_Containment)
         {
           ImGuiAppNode* child = AppGraphFindNode(g, AppGraphPortOwnerId(g, s));
@@ -1960,7 +2229,7 @@ namespace ImGui
     }
     if (remove >= 0)
       g->Bindings.erase(g->Bindings.Data + remove);
-    if (ImGui::SmallButton("Add binding"))
+    if (AppBlAddPill("Add binding", "Add binding"))
     {
       ImGuiAppFieldBinding b;
       b.LinkId = link_id;
@@ -2288,15 +2557,17 @@ namespace ImGui
       EditAppWindowNodeProps(n);               // sidebar dock direction / size
       break;
     case ImGuiAppNodeKind_Struct:
-      EditAppFieldList("fields", &n->Draft.PersistFields);
+      EditAppFieldList("fields", &n->Draft.PersistFields, g);
       break;
     case ImGuiAppNodeKind_Field:
     {
       const int sid = AppGraphParentOf(g, n->Id);
       const ImGuiAppNode* sn = sid >= 0 ? AppGraphFindNodeConst(g, sid) : nullptr;
-      const ImGuiAppFieldType ft = n->Draft.PersistFields.Size > 0 ? n->Draft.PersistFields.Data[0].Type
-                                                                   : ImGuiAppFieldType_Float;
-      ImGui::TextDisabled("type: %s", AppFieldTypeName(ft));
+      if (n->Draft.PersistFields.Size == 0)
+        n->Draft.PersistFields.push_back(ImGuiAppFieldDesc());
+      ImGui::TextDisabled("type");
+      ImGui::SameLine();
+      EditAppFieldTypeControls(&n->Draft.PersistFields.Data[0], ImGui::GetFontSize() * 5.0f, g);
       ImGui::TextDisabled("of struct: %s", sn != nullptr ? sn->Draft.Name : "(none)");
       break;
     }
@@ -2309,10 +2580,207 @@ namespace ImGui
     ImGui::PopID();
   }
 
+  static bool AppGraphHostsControl(const ImGuiAppGraph* g, int host_id);   // fwd
+
+  // Node color by kind, shared by the outliner rows and the canvas group frames.
+  static ImU32 AppKindColor(ImGuiAppNodeKind k)
+  {
+    switch (k)
+    {
+    case ImGuiAppNodeKind_Layer:   return IM_COL32(155, 155, 155, 255);
+    case ImGuiAppNodeKind_Window:  return IM_COL32(120, 170, 230, 255);
+    case ImGuiAppNodeKind_Sidebar: return IM_COL32(120, 200, 200, 255);
+    case ImGuiAppNodeKind_Control: return IM_COL32(215, 165, 95, 255);
+    case ImGuiAppNodeKind_Struct:  return IM_COL32(170, 145, 220, 255);
+    case ImGuiAppNodeKind_Field:   return IM_COL32(140, 205, 140, 255);
+    default:                       return IM_COL32(205, 205, 205, 255);
+    }
+  }
+
+  // Immediate group-parent of a node (the node whose collapse would hide it): field -> its struct, owned struct
+  // -> its control, hosted control -> its window/sidebar. -1 at a group root. Distinct from AppGraphParentOf for
+  // the struct case (a struct is tied to its control by a data edge, not a containment edge).
+  static int AppGroupOwnerOf(const ImGuiAppGraph* g, int id)
+  {
+    const ImGuiAppNode* n = AppGraphFindNodeConst(g, id);
+    if (n == nullptr)
+      return -1;
+    if (n->Kind == ImGuiAppNodeKind_Field)
+      return AppGraphParentOf(g, id);
+    if (n->Kind == ImGuiAppNodeKind_Struct)
+    {
+      for (int i = 0; i < g->Nodes.Size; i++)
+        if (g->Nodes.Data[i].PersistStructId == id || g->Nodes.Data[i].TempStructId == id)
+          return g->Nodes.Data[i].Id;
+      return -1;
+    }
+    if (n->Kind == ImGuiAppNodeKind_Control)
+      return AppGraphParentOf(g, id);
+    return -1;
+  }
+
+  // True if some ancestor group of this node is collapsed, so the node should not be submitted to imnodes.
+  static bool AppNodeHiddenByCollapse(const ImGuiAppGraph* g, int id)
+  {
+    for (int owner = AppGroupOwnerOf(g, id); owner >= 0; owner = AppGroupOwnerOf(g, owner))
+    {
+      const ImGuiAppNode* o = AppGraphFindNodeConst(g, owner);
+      if (o != nullptr && o->GroupCollapsed)
+        return true;
+    }
+    return false;
+  }
+
+  // Accumulate the screen-space bounding box of a containment group: the owner node + all its descendants
+  // (window/sidebar -> hosted controls -> their data structs -> fields; control -> its structs -> fields;
+  // struct -> fields). Skips hidden live nodes. Recursive.
+  static void AppGroupAccumulate(const ImGuiAppGraph* g, int owner_id, bool show_live, ImVec2* mn, ImVec2* mx)
+  {
+    const ImGuiAppNode* n = AppGraphFindNodeConst(g, owner_id);
+    if (n == nullptr || (!show_live && n->IsLive) || AppNodeHiddenByCollapse(g, owner_id))
+      return;   // a node hidden behind a collapsed ancestor was never submitted -> reading its pos would assert
+    const ImVec2 p = ImNodes::GetNodeScreenSpacePos(owner_id);
+    const ImVec2 d = ImNodes::GetNodeDimensions(owner_id);
+    mn->x = ImMin(mn->x, p.x); mn->y = ImMin(mn->y, p.y);
+    mx->x = ImMax(mx->x, p.x + d.x); mx->y = ImMax(mx->y, p.y + d.y);
+
+    if (n->Kind == ImGuiAppNodeKind_Window || n->Kind == ImGuiAppNodeKind_Sidebar)
+    {
+      for (int i = 0; i < g->Nodes.Size; i++)
+        if (g->Nodes.Data[i].Kind == ImGuiAppNodeKind_Control && AppGraphParentOf(g, g->Nodes.Data[i].Id) == owner_id)
+          AppGroupAccumulate(g, g->Nodes.Data[i].Id, show_live, mn, mx);
+    }
+    else if (n->Kind == ImGuiAppNodeKind_Control)
+    {
+      if (n->PersistStructId >= 0) AppGroupAccumulate(g, n->PersistStructId, show_live, mn, mx);
+      if (n->TempStructId >= 0)    AppGroupAccumulate(g, n->TempStructId, show_live, mn, mx);
+    }
+    else if (n->Kind == ImGuiAppNodeKind_Struct)
+    {
+      for (int i = 0; i < g->Nodes.Size; i++)
+        if (g->Nodes.Data[i].Kind == ImGuiAppNodeKind_Field && AppGraphParentOf(g, g->Nodes.Data[i].Id) == owner_id)
+          AppGroupAccumulate(g, g->Nodes.Data[i].Id, show_live, mn, mx);
+    }
+  }
+
+  // Tidy tree layout. Walk one containment subtree left-to-right by depth (window -> hosted controls -> data
+  // structs -> fields), stacking siblings vertically and centering each parent on its children's span. Returns
+  // the y the node was placed at. Uses a single running cursor so separate roots never overlap.
+  static float AppLayoutWalk(ImGuiAppGraph* g, int id, int depth, float base_x, float* cursor_y)
+  {
+    ImGuiAppNode* n = AppGraphFindNode(g, id);
+    if (n == nullptr)
+      return *cursor_y;
+
+    ImVector<int> kids;
+    if (n->Kind == ImGuiAppNodeKind_Window || n->Kind == ImGuiAppNodeKind_Sidebar)
+    {
+      for (int i = 0; i < g->Nodes.Size; i++)
+        if (g->Nodes.Data[i].Kind == ImGuiAppNodeKind_Control && AppGraphParentOf(g, g->Nodes.Data[i].Id) == id)
+          kids.push_back(g->Nodes.Data[i].Id);
+    }
+    else if (n->Kind == ImGuiAppNodeKind_Control)
+    {
+      if (n->PersistStructId >= 0) kids.push_back(n->PersistStructId);
+      if (n->TempStructId >= 0)    kids.push_back(n->TempStructId);
+    }
+    else if (n->Kind == ImGuiAppNodeKind_Struct)
+    {
+      for (int i = 0; i < g->Nodes.Size; i++)
+        if (g->Nodes.Data[i].Kind == ImGuiAppNodeKind_Field && AppGraphParentOf(g, g->Nodes.Data[i].Id) == id)
+          kids.push_back(g->Nodes.Data[i].Id);
+    }
+
+    const float col_w = 320.0f;
+    const float x = base_x + (float)depth * col_w;
+    const float row_h = (n->Kind == ImGuiAppNodeKind_Field) ? 78.0f : 134.0f;
+
+    if (kids.Size == 0)
+    {
+      const float y = *cursor_y;
+      n->GridPos = ImVec2(x, y);
+      n->HasGridPos = true;
+      n->_NeedsPlace = true;
+      *cursor_y = y + row_h;
+      return y;
+    }
+
+    float first = 0.0f;
+    float last = 0.0f;
+    for (int k = 0; k < kids.Size; k++)
+    {
+      const float cy = AppLayoutWalk(g, kids.Data[k], depth + 1, base_x, cursor_y);
+      if (k == 0)
+        first = cy;
+      last = cy;
+    }
+    n = AppGraphFindNode(g, id);   // recursion only repositions (never adds), but re-find to be safe
+    const float y = (first + last) * 0.5f;
+    n->GridPos = ImVec2(x, y);
+    n->HasGridPos = true;
+    n->_NeedsPlace = true;
+    return y;
+  }
+
+  void AppGraphAutoLayout(ImGuiAppGraph* g, bool show_live)
+  {
+    IM_ASSERT(g != nullptr);
+
+    float cursor_y = 60.0f;
+    const float base_x = 60.0f;
+    for (int i = 0; i < g->Nodes.Size; i++)
+    {
+      const ImGuiAppNode* n = &g->Nodes.Data[i];
+      if (n->Kind == ImGuiAppNodeKind_Layer)      // layers keep their own tight column packer
+        continue;
+      if (!show_live && n->IsLive)
+        continue;
+
+      bool is_root = true;
+      if (n->Kind == ImGuiAppNodeKind_Control || n->Kind == ImGuiAppNodeKind_Field)
+      {
+        is_root = AppGraphParentOf(g, n->Id) < 0;
+      }
+      else if (n->Kind == ImGuiAppNodeKind_Struct)
+      {
+        for (int j = 0; j < g->Nodes.Size; j++)
+          if (g->Nodes.Data[j].PersistStructId == n->Id || g->Nodes.Data[j].TempStructId == n->Id)
+          {
+            is_root = false;
+            break;
+          }
+      }
+      if (is_root)
+        AppLayoutWalk(g, n->Id, 0, base_x, &cursor_y);
+    }
+  }
+
+  // Pin color by port kind: data pins blue, containment pins orange (tie pins use kAppPinTie green).
+  static ImU32 AppPinColor(ImGuiAppPortKind kind)
+  {
+    switch (kind)
+    {
+    case ImGuiAppPortKind_DataIn:
+    case ImGuiAppPortKind_DataOut:  return IM_COL32(120, 170, 230, 255);
+    case ImGuiAppPortKind_ChildIn:
+    case ImGuiAppPortKind_ChildOut: return IM_COL32(230, 170, 110, 255);
+    default:                        return IM_COL32(160, 160, 160, 255);
+    }
+  }
+  static const ImU32 kAppPinTie = IM_COL32(140, 200, 140, 255);
+
   void ShowAppGraphEditor(ImGuiApp* app, ImGuiAppGraph* g, int* selected_node_id, bool show_live)
   {
     IM_ASSERT(g != nullptr);
     IM_UNUSED(app);
+
+    // Snap-to-grid: toggled by the G key (latched here, applied to the imnodes style for this frame). When on,
+    // imnodes snaps node origins to the grid as they're dragged.
+    static bool s_snap_grid = false;
+    if (s_snap_grid)
+      ImNodes::GetStyle().Flags |= ImNodesStyleFlags_GridSnapping;
+    else
+      ImNodes::GetStyle().Flags &= ~ImNodesStyleFlags_GridSnapping;
 
     // While hidden, live nodes are not submitted, so imnodes evicts them from its pool. On the hidden->shown
     // transition, re-arm _NeedsPlace so each one is re-placed at its saved GridPos (otherwise imnodes recreates
@@ -2339,6 +2807,10 @@ namespace ImGui
     int pending_list = 0;
 
     ImNodes::BeginNodeEditor();
+    // Link editing: drag a wire's endpoint off a pin to detach + rewire it; snap-create completes a wire when its
+    // free end hovers a compatible pin. Both apply to every attribute submitted this frame.
+    ImNodes::PushAttributeFlag(ImNodesAttributeFlags_EnableLinkDetachWithDragClick);
+    ImNodes::PushAttributeFlag(ImNodesAttributeFlags_EnableLinkCreationOnSnap);
 
     for (int i = 0; i < g->Nodes.Size; i++)
     {
@@ -2347,6 +2819,9 @@ namespace ImGui
       // Hidden live mirror: skip the ENTIRE per-node submission (incl. placement). Merely skipping the body
       // would leave the grid-pos read-back below dereferencing a node imnodes evicted -> hard assert.
       if (!show_live && n->IsLive)
+        continue;
+      // Folded behind a collapsed ancestor group: same deal -- never submit, so the read-back skips it too.
+      if (AppNodeHiddenByCollapse(g, n->Id))
         continue;
 
       if (n->Kind == ImGuiAppNodeKind_Layer)
@@ -2377,8 +2852,13 @@ namespace ImGui
         const bool is_tie_pin = n->Kind == ImGuiAppNodeKind_Control && (strcmp(port->Name, "persist") == 0 || strcmp(port->Name, "temp") == 0);
         if (is_tie_pin)
           continue;
-        if (port->Kind == ImGuiAppPortKind_DataIn)  { ImNodes::BeginInputAttribute(port->Id); ImGui::TextUnformatted(port->Name); ImNodes::EndInputAttribute(); }
-        else if (port->Kind == ImGuiAppPortKind_ChildIn) { ImNodes::BeginInputAttribute(port->Id); ImGui::TextUnformatted(port->Name); ImNodes::EndInputAttribute(); }
+        if (port->Kind != ImGuiAppPortKind_DataIn && port->Kind != ImGuiAppPortKind_ChildIn)
+          continue;
+        ImNodes::PushColorStyle(ImNodesCol_Pin, AppPinColor(port->Kind));
+        ImNodes::BeginInputAttribute(port->Id);
+        ImGui::TextUnformatted(port->Name);
+        ImNodes::EndInputAttribute();
+        ImNodes::PopColorStyle();
       }
 
       // A control's exploded PersistData/TempData tie pins, each on its own row (so the wire enters at that line).
@@ -2391,6 +2871,7 @@ namespace ImGui
           if (sid < 0)
             continue;
           const int pin = AppNodePortByName(n, temp ? "temp" : "persist");
+          ImNodes::PushColorStyle(ImNodesCol_Pin, kAppPinTie);
           ImNodes::BeginInputAttribute(pin);
           ImGui::PushID(100 + list);
           if (AppBlDisclosure("##tie", true))
@@ -2404,6 +2885,7 @@ namespace ImGui
           ImGui::TextDisabled("%s -> %s", temp ? "TempData" : "PersistData", sn != nullptr ? sn->Draft.Name : "(struct)");
           ImGui::PopID();
           ImNodes::EndInputAttribute();
+          ImNodes::PopColorStyle();
         }
       }
 
@@ -2446,7 +2928,7 @@ namespace ImGui
               pending_list = list;
             }
             ImGui::SameLine();
-            EditAppFieldList(temp ? "TempData" : "PersistData", AppNodeFieldList(n, list));
+            EditAppFieldList(temp ? "TempData" : "PersistData", AppNodeFieldList(n, list), g);
             ImGui::PopID();
           }
           if (!n->IsLive)
@@ -2491,8 +2973,8 @@ namespace ImGui
             ImGui::EndCombo();
           }
         }
-        if (n->LayerType == ImGuiAppLayerType_Command)
-          EditAppNodeCommands(n);
+        if (n->LayerType == ImGuiAppLayerType_Command && !n->IsLive)
+          EditAppNodeCommands(n);   // a live command layer is read-only; don't render its editor (also keeps it short)
         ImGui::Dummy(ImVec2(kAppGraphLayerNodeWidth, 1.0f));
       }
       else if (n->Kind == ImGuiAppNodeKind_Window || n->Kind == ImGuiAppNodeKind_Sidebar)
@@ -2526,14 +3008,15 @@ namespace ImGui
         if (exploded > 0)
           ImGui::TextDisabled("fields (%d, expanded)", exploded);
         else
-          EditAppFieldList("fields", &n->Draft.PersistFields);
+          EditAppFieldList("fields", &n->Draft.PersistFields, g);
       }
       else if (n->Kind == ImGuiAppNodeKind_Field)
       {
-        // One field exploded out of a struct: title is the field name, body shows its type. Wire its "value" out.
-        const ImGuiAppFieldType ft = n->Draft.PersistFields.Size > 0 ? n->Draft.PersistFields.Data[0].Type
-                                                                     : ImGuiAppFieldType_Float;
-        ImGui::TextDisabled("%s", AppFieldTypeName(ft));
+        // One field exploded out of a struct: the title IS the field name; edit its type here (a struct-typed
+        // field picks another Struct -> recursive nesting). Wire its "value" out.
+        if (n->Draft.PersistFields.Size == 0)
+          n->Draft.PersistFields.push_back(ImGuiAppFieldDesc());   // keep body non-empty + give the editor a field
+        EditAppFieldTypeControls(&n->Draft.PersistFields.Data[0], ImGui::GetFontSize() * 5.0f, g);
       }
       else
       {
@@ -2547,8 +3030,13 @@ namespace ImGui
       for (int p = 0; p < n->Ports.Size; p++)
       {
         ImGuiAppNodePort* port = &n->Ports.Data[p];
-        if (port->Kind == ImGuiAppPortKind_DataOut) { ImNodes::BeginOutputAttribute(port->Id); ImGui::TextUnformatted(port->Name); ImNodes::EndOutputAttribute(); }
-        else if (port->Kind == ImGuiAppPortKind_ChildOut) { ImNodes::BeginOutputAttribute(port->Id); ImGui::TextUnformatted(port->Name); ImNodes::EndOutputAttribute(); }
+        if (port->Kind != ImGuiAppPortKind_DataOut && port->Kind != ImGuiAppPortKind_ChildOut)
+          continue;
+        ImNodes::PushColorStyle(ImNodesCol_Pin, AppPinColor(port->Kind));
+        ImNodes::BeginOutputAttribute(port->Id);
+        ImGui::TextUnformatted(port->Name);
+        ImNodes::EndOutputAttribute();
+        ImNodes::PopColorStyle();
       }
 
       ImGui::EndAppNode();
@@ -2560,20 +3048,379 @@ namespace ImGui
     // owners.)
     for (int li = 0; li < g->Links.Size; li++)
     {
-      if (!show_live)
-      {
-        ImGuiAppNode* oa = nullptr; ImGuiAppNode* ob = nullptr;
-        AppGraphFindPort(g, g->Links.Data[li].StartAttr, &oa);
-        AppGraphFindPort(g, g->Links.Data[li].EndAttr, &ob);
-        if ((oa && oa->IsLive) || (ob && ob->IsLive)) continue;
-      }
+      ImGuiAppNode* oa = nullptr; ImGuiAppNode* ob = nullptr;
+      AppGraphFindPort(g, g->Links.Data[li].StartAttr, &oa);
+      AppGraphFindPort(g, g->Links.Data[li].EndAttr, &ob);
+      if (!show_live && ((oa && oa->IsLive) || (ob && ob->IsLive)))
+        continue;
+      // Skip links into a node folded behind a collapsed group: its attribute was not submitted this frame.
+      if ((oa && AppNodeHiddenByCollapse(g, oa->Id)) || (ob && AppNodeHiddenByCollapse(g, ob->Id)))
+        continue;
       ImNodes::Link(g->Links.Data[li].Id, g->Links.Data[li].StartAttr, g->Links.Data[li].EndAttr);
     }
 
     // Overview minimap (drawn as an overlay inside the editor; must precede EndNodeEditor). Lets the user see
     // and jump to nodes that sit past the visible canvas edge.
+    ImNodes::PopAttributeFlag();
+    ImNodes::PopAttributeFlag();
     ImNodes::MiniMap(0.2f, ImNodesMiniMapLocation_BottomRight);
     ImNodes::EndNodeEditor();
+    const ImVec2 editor_size = ImGui::GetItemRectSize();   // captured before later items, for fit-all centering
+    const ImVec2 editor_min  = ImGui::GetItemRectMin();    // editor canvas rect (screen), for overlay extents
+    const ImVec2 editor_max  = ImGui::GetItemRectMax();
+
+    // Alignment guides: while dragging a single node, draw Blender-style guide lines wherever one of its edges
+    // (or center) lines up with another visible node's edge/center, within a few pixels. Pure visual aid.
+    if (ImNodes::NumSelectedNodes() == 1 && ImGui::IsMouseDragging(ImGuiMouseButton_Left))
+    {
+      int picked = -1;
+      ImNodes::GetSelectedNodes(&picked);
+      const ImGuiAppNode* pn = picked >= 0 ? AppGraphFindNodeConst(g, picked) : nullptr;
+      if (pn != nullptr && !(!show_live && pn->IsLive) && !AppNodeHiddenByCollapse(g, picked))
+      {
+        const ImVec2 pp = ImNodes::GetNodeScreenSpacePos(picked);
+        const ImVec2 pd = ImNodes::GetNodeDimensions(picked);
+        const float px[3] = { pp.x, pp.x + pd.x * 0.5f, pp.x + pd.x };
+        const float py[3] = { pp.y, pp.y + pd.y * 0.5f, pp.y + pd.y };
+        const float tol = 5.0f;
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const ImU32 guide = IM_COL32(255, 120, 200, 180);
+        for (int i = 0; i < g->Nodes.Size; i++)
+        {
+          const ImGuiAppNode* on = &g->Nodes.Data[i];
+          if (on->Id == picked || (!show_live && on->IsLive) || AppNodeHiddenByCollapse(g, on->Id))
+            continue;
+          const ImVec2 op = ImNodes::GetNodeScreenSpacePos(on->Id);
+          const ImVec2 od = ImNodes::GetNodeDimensions(on->Id);
+          const float ox[3] = { op.x, op.x + od.x * 0.5f, op.x + od.x };
+          const float oy[3] = { op.y, op.y + od.y * 0.5f, op.y + od.y };
+          for (int a = 0; a < 3; a++)
+            for (int b = 0; b < 3; b++)
+            {
+              if (ImAbs(px[a] - ox[b]) <= tol)
+                dl->AddLine(ImVec2(ox[b], editor_min.y), ImVec2(ox[b], editor_max.y), guide, 1.0f);
+              if (ImAbs(py[a] - oy[b]) <= tol)
+                dl->AddLine(ImVec2(editor_min.x, oy[b]), ImVec2(editor_max.x, oy[b]), guide, 1.0f);
+            }
+        }
+      }
+    }
+
+    // Quick-connect by proximity: while dragging a single node near a compatible one, preview a ghost wire
+    // between their centers; on release, auto-wire their primary complementary ports (validated like any link).
+    // imnodes exposes no pin coordinates, so this works at node granularity (centers), not exact pins.
+    {
+      static int s_qc_src = -1;     // chosen src port, latched during the drag for the release frame
+      static int s_qc_dst = -1;
+
+      auto ports_linked = [&](int pa, int pb) -> bool
+      {
+        for (int i = 0; i < g->Links.Size; i++)
+          if ((g->Links.Data[i].StartAttr == pa && g->Links.Data[i].EndAttr == pb) ||
+              (g->Links.Data[i].StartAttr == pb && g->Links.Data[i].EndAttr == pa))
+            return true;
+        return false;
+      };
+      // Pick a legal (src,dst) port pair between two nodes, or (-1,-1). Tries the natural data/containment
+      // directions both ways and lets AppGraphCanLink arbitrate.
+      auto qc_pair = [&](int a, int b, int* src, int* dst) -> bool
+      {
+        const ImGuiAppNode* na = AppGraphFindNodeConst(g, a);
+        const ImGuiAppNode* nb = AppGraphFindNodeConst(g, b);
+        if (na == nullptr || nb == nullptr)
+          return false;
+        const ImGuiAppPortKind outs[2] = { ImGuiAppPortKind_DataOut, ImGuiAppPortKind_ChildOut };
+        const ImGuiAppPortKind ins[2]  = { ImGuiAppPortKind_DataIn,  ImGuiAppPortKind_ChildIn };
+        for (int dir = 0; dir < 2; dir++)
+        {
+          const ImGuiAppNode* from = dir == 0 ? na : nb;
+          const ImGuiAppNode* to   = dir == 0 ? nb : na;
+          for (int k = 0; k < 2; k++)
+          {
+            const int sp = AppNodeFirstPortKind(from, outs[k]);
+            const int dp = AppNodeFirstPortKind(to, ins[k]);
+            if (sp <= 0 || dp <= 0 || ports_linked(sp, dp))
+              continue;
+            char err[8];
+            if (AppGraphCanLink(g, sp, dp, err, IM_ARRAYSIZE(err)))
+            {
+              *src = sp;
+              *dst = dp;
+              return true;
+            }
+          }
+        }
+        return false;
+      };
+
+      bool have_candidate = false;
+      if (ImNodes::NumSelectedNodes() == 1 && ImGui::IsMouseDragging(ImGuiMouseButton_Left))
+      {
+        int picked = -1;
+        ImNodes::GetSelectedNodes(&picked);
+        const ImGuiAppNode* pn = picked >= 0 ? AppGraphFindNodeConst(g, picked) : nullptr;
+        if (pn != nullptr && !(!show_live && pn->IsLive) && !AppNodeHiddenByCollapse(g, picked))
+        {
+          const ImVec2 pp = ImNodes::GetNodeScreenSpacePos(picked);
+          const ImVec2 pd = ImNodes::GetNodeDimensions(picked);
+          const ImVec2 pc(pp.x + pd.x * 0.5f, pp.y + pd.y * 0.5f);
+          float best = 280.0f;   // max center distance to consider
+          int   best_node = -1;
+          int   best_src = -1;
+          int   best_dst = -1;
+          for (int i = 0; i < g->Nodes.Size; i++)
+          {
+            const ImGuiAppNode* on = &g->Nodes.Data[i];
+            if (on->Id == picked || (!show_live && on->IsLive) || AppNodeHiddenByCollapse(g, on->Id) || on->Kind == ImGuiAppNodeKind_Layer)
+              continue;
+            const ImVec2 op = ImNodes::GetNodeScreenSpacePos(on->Id);
+            const ImVec2 od = ImNodes::GetNodeDimensions(on->Id);
+            const ImVec2 oc(op.x + od.x * 0.5f, op.y + od.y * 0.5f);
+            const float dist = ImSqrt((oc.x - pc.x) * (oc.x - pc.x) + (oc.y - pc.y) * (oc.y - pc.y));
+            if (dist >= best)
+              continue;
+            int sp = -1, dp = -1;
+            if (qc_pair(picked, on->Id, &sp, &dp))
+            {
+              best = dist;
+              best_node = on->Id;
+              best_src = sp;
+              best_dst = dp;
+            }
+          }
+          if (best_node >= 0)
+          {
+            const ImVec2 op = ImNodes::GetNodeScreenSpacePos(best_node);
+            const ImVec2 od = ImNodes::GetNodeDimensions(best_node);
+            const ImVec2 oc(op.x + od.x * 0.5f, op.y + od.y * 0.5f);
+            ImGui::GetWindowDrawList()->AddLine(pc, oc, IM_COL32(120, 220, 140, 220), 2.5f);
+            ImGui::GetWindowDrawList()->AddCircleFilled(oc, 5.0f, IM_COL32(120, 220, 140, 220));
+            s_qc_src = best_src;
+            s_qc_dst = best_dst;
+            have_candidate = true;
+          }
+        }
+      }
+      if (ImGui::IsMouseDragging(ImGuiMouseButton_Left))
+      {
+        if (!have_candidate)   // dragged away from any partner -> drop the stale latch
+        {
+          s_qc_src = -1;
+          s_qc_dst = -1;
+        }
+      }
+      else
+      {
+        if (ImGui::IsMouseReleased(ImGuiMouseButton_Left) && s_qc_src > 0 && s_qc_dst > 0)
+        {
+          AppGraphTryConnect(g, s_qc_src, s_qc_dst);
+          AppInferStructFieldType(g, s_qc_src, s_qc_dst);
+        }
+        s_qc_src = -1;
+        s_qc_dst = -1;
+      }
+    }
+
+    // Semantic group frames: a translucent labeled box around each containment group, layered by depth so inner
+    // groups sit atop outer ones -- windows/sidebars (+ hosted controls) behind, control data clusters, then
+    // structs (+ their fields) in front.
+    {
+      auto group_box = [&](int owner_id, ImU32 kind_col, int depth)
+      {
+        ImVec2 mn(FLT_MAX, FLT_MAX);
+        ImVec2 mx(-FLT_MAX, -FLT_MAX);
+        AppGroupAccumulate(g, owner_id, show_live, &mn, &mx);
+        if (mn.x > mx.x)
+          return;
+        const ImGuiAppNode* owner = AppGraphFindNodeConst(g, owner_id);
+        const float em = ImGui::GetFontSize();
+        const float pad = em * (0.5f + 0.22f * (float)depth);   // outer groups get more breathing room
+        const float title_h = ImGui::GetFrameHeight();
+        mn.x -= pad; mx.x += pad; mx.y += pad;
+        mn.y -= title_h + pad * 0.4f;
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const ImU32 fill = (kind_col & 0x00FFFFFF) | (IM_COL32(0, 0, 0, 18) & 0xFF000000);
+        const ImU32 line = (kind_col & 0x00FFFFFF) | (IM_COL32(0, 0, 0, 130) & 0xFF000000);
+        dl->AddRectFilled(mn, mx, fill, 5.0f);
+        dl->AddRect(mn, mx, line, 5.0f, 0, 1.5f);
+        if (owner != nullptr)
+        {
+          const char* title = owner->Draft.Name[0] ? owner->Draft.Name : AppNodeKindName(owner->Kind);
+          ImVector<int> members;
+          AppGraphCollectSubtree(g, owner_id, &members);
+          const int member_count = members.Size - 1;   // exclude the owner itself
+
+          // Chip text: name, plus a "+N" hidden-count badge when the group is folded.
+          char label[160];
+          if (owner->GroupCollapsed)
+            ImFormatString(label, IM_ARRAYSIZE(label), "%s  +%d", title, member_count);
+          else
+            ImStrncpy(label, title, IM_ARRAYSIZE(label));
+
+          const float tri_w = em * 0.9f;
+          const ImVec2 ts = ImGui::CalcTextSize(label);
+          const ImVec2 chip_mn(mn.x + pad, mn.y);
+          const ImVec2 chip_mx(chip_mn.x + tri_w + ts.x + em * 0.5f, mn.y + title_h);
+
+          // The chip is both a fold toggle and a move handle: a click (no drag) collapses/expands the group; a
+          // drag moves the owner + every descendant together. One gesture at a time, tracked across frames.
+          static bool s_group_moved = false;
+          ImGui::SetCursorScreenPos(chip_mn);
+          ImGui::PushID(owner_id);
+          ImGui::InvisibleButton("##grouphandle", chip_mx - chip_mn);
+          const bool hov = ImGui::IsItemHovered();
+          const bool act = ImGui::IsItemActive();
+          if (ImGui::IsItemActivated())
+            s_group_moved = false;
+          if (act && ImGui::IsMouseDragging(ImGuiMouseButton_Left))
+          {
+            const ImVec2 d = ImGui::GetIO().MouseDelta;
+            if (d.x != 0.0f || d.y != 0.0f)
+            {
+              s_group_moved = true;
+              for (int m = 0; m < members.Size; m++)
+              {
+                ImGuiAppNode* mm = AppGraphFindNode(g, members.Data[m]);
+                if (mm == nullptr || (!show_live && mm->IsLive))
+                  continue;
+                if (AppNodeHiddenByCollapse(g, members.Data[m]))
+                {
+                  mm->GridPos += d;        // folded member: not in the imnodes pool, move its stored pos only
+                  mm->HasGridPos = true;
+                  mm->_NeedsPlace = true;  // re-seat it at this pos when the group is expanded
+                }
+                else
+                {
+                  const ImVec2 np = ImNodes::GetNodeGridSpacePos(members.Data[m]) + d;
+                  ImNodes::SetNodeGridSpacePos(members.Data[m], np);
+                  mm->GridPos = np;
+                }
+              }
+            }
+          }
+          if (ImGui::IsItemDeactivated() && !s_group_moved)
+          {
+            if (ImGuiAppNode* o = AppGraphFindNode(g, owner_id))
+            {
+              o->GroupCollapsed = !o->GroupCollapsed;
+              if (!o->GroupCollapsed)                  // expanding: re-seat descendants at their stored positions
+                for (int m = 0; m < members.Size; m++)
+                  if (ImGuiAppNode* mm = AppGraphFindNode(g, members.Data[m]))
+                    mm->_NeedsPlace = true;
+            }
+          }
+          if (hov || act)
+            ImGui::SetMouseCursor(member_count > 0 ? ImGuiMouseCursor_Hand : ImGuiMouseCursor_ResizeAll);
+          ImGui::PopID();
+
+          const ImU32 chip_bg = (hov || act) ? ((line & 0x00FFFFFF) | 0xFF000000) : line;
+          dl->AddRectFilled(chip_mn, chip_mx, chip_bg, 3.0f);
+          // Disclosure triangle: right-pointing when folded, down-pointing when open.
+          const ImU32 glyph = IM_COL32(235, 235, 235, 255);
+          const ImVec2 tc(chip_mn.x + tri_w * 0.5f, (chip_mn.y + chip_mx.y) * 0.5f);
+          const float a = em * 0.22f;
+          if (owner->GroupCollapsed)
+            dl->AddTriangleFilled(ImVec2(tc.x - a * 0.55f, tc.y - a), ImVec2(tc.x - a * 0.55f, tc.y + a), ImVec2(tc.x + a * 0.8f, tc.y), glyph);
+          else
+            dl->AddTriangleFilled(ImVec2(tc.x - a, tc.y - a * 0.55f), ImVec2(tc.x + a, tc.y - a * 0.55f), ImVec2(tc.x, tc.y + a * 0.8f), glyph);
+          dl->AddText(ImVec2(chip_mn.x + tri_w, mn.y + (title_h - ts.y) * 0.5f), glyph, label);
+        }
+      };
+
+      // Pass 1: windows/sidebars hosting controls (outermost).
+      for (int i = 0; i < g->Nodes.Size; i++)
+      {
+        const ImGuiAppNode* n = &g->Nodes.Data[i];
+        if ((n->Kind == ImGuiAppNodeKind_Window || n->Kind == ImGuiAppNodeKind_Sidebar) && !(!show_live && n->IsLive) && AppGraphHostsControl(g, n->Id))
+          group_box(n->Id, AppKindColor(n->Kind), 2);
+      }
+      // Pass 2: control data clusters (a control with an exploded Persist/Temp struct).
+      for (int i = 0; i < g->Nodes.Size; i++)
+      {
+        const ImGuiAppNode* n = &g->Nodes.Data[i];
+        if (n->Kind == ImGuiAppNodeKind_Control && (n->PersistStructId >= 0 || n->TempStructId >= 0))
+          group_box(n->Id, AppKindColor(ImGuiAppNodeKind_Control), 1);
+      }
+      // Pass 3: structs with exploded fields (innermost).
+      for (int i = 0; i < g->Nodes.Size; i++)
+      {
+        const ImGuiAppNode* n = &g->Nodes.Data[i];
+        if (n->Kind == ImGuiAppNodeKind_Struct && !(!show_live && n->IsLive) && AppGraphFieldNodeCount(g, n->Id, 0) > 0)
+          group_box(n->Id, AppKindColor(ImGuiAppNodeKind_Struct), 0);
+      }
+    }
+
+    // Live-mirror diff dots: a small status dot at each node's top-right corner showing how it relates to the
+    // running app -- blue = a live mirror node, green = a design node already running (promoted), amber = a
+    // design node that is NOT in the running app yet (drift). Only meaningful once the app is initialized.
+    {
+      const bool app_running = app != nullptr && app->Initialized;
+      ImDrawList* dl = ImGui::GetWindowDrawList();
+      const float r = ImGui::GetFontSize() * 0.28f;
+      for (int i = 0; i < g->Nodes.Size; i++)
+      {
+        const ImGuiAppNode* n = &g->Nodes.Data[i];
+        if ((!show_live && n->IsLive) || AppNodeHiddenByCollapse(g, n->Id))
+          continue;
+
+        ImU32 dot = 0;
+        const char* tip = nullptr;
+        if (n->IsLive)
+        {
+          dot = IM_COL32(90, 150, 230, 255);
+          tip = "running (live mirror)";
+        }
+        else if (n->IsPromoted)
+        {
+          dot = IM_COL32(110, 200, 120, 255);
+          tip = "matches a running control";
+        }
+        else if (app_running && (n->Kind == ImGuiAppNodeKind_Control))
+        {
+          dot = IM_COL32(225, 180, 90, 255);
+          tip = "design-only -- not in the running app yet";
+        }
+        if (dot == 0)
+          continue;
+
+        const ImVec2 p = ImNodes::GetNodeScreenSpacePos(n->Id);
+        const ImVec2 d = ImNodes::GetNodeDimensions(n->Id);
+        const ImVec2 c(p.x + d.x - r * 1.6f, p.y + r * 1.6f);
+        dl->AddCircleFilled(c, r, dot);
+        dl->AddCircle(c, r, IM_COL32(20, 20, 20, 160));
+        if (tip != nullptr)
+        {
+          const ImVec2 m = ImGui::GetIO().MousePos;
+          const float dx = m.x - c.x;
+          const float dy = m.y - c.y;
+          if (dx * dx + dy * dy <= (r + 2.0f) * (r + 2.0f))
+            ImGui::SetTooltip("%s", tip);
+        }
+      }
+    }
+
+    // Port hover tooltip: name + (for data pins) the carried data type.
+    {
+      int hov_pin = 0;
+      if (ImNodes::IsPinHovered(&hov_pin))
+      {
+        ImGuiAppNode* owner = nullptr;
+        ImGuiAppNodePort* port = AppGraphFindPort(g, hov_pin, &owner);
+        if (port != nullptr && owner != nullptr)
+        {
+          if (port->Kind == ImGuiAppPortKind_DataOut)
+          {
+            char dt[IM_LABEL_SIZE];
+            AppNodeDataTypeName(owner, dt, IM_ARRAYSIZE(dt));
+            ImGui::SetTooltip("%s : %s", port->Name, dt);
+          }
+          else
+          {
+            ImGui::SetTooltip("%s", port->Name);
+          }
+        }
+      }
+    }
 
     // Persist canvas layout for save/load. Skip hidden live nodes: they were not submitted, so a read-back
     // would assert; skipping also correctly retains each hidden node's last-shown GridPos.
@@ -2582,6 +3429,7 @@ namespace ImGui
     for (int i = 0; i < g->Nodes.Size; i++)
     {
       if (!show_live && g->Nodes.Data[i].IsLive) continue;
+      if (AppNodeHiddenByCollapse(g, g->Nodes.Data[i].Id)) continue;
       ImGuiAppNode* n = &g->Nodes.Data[i];
       const ImVec2 pos = ImNodes::GetNodeGridSpacePos(n->Id);
       if (n->Kind == ImGuiAppNodeKind_Layer && n->HasGridPos
@@ -2669,6 +3517,123 @@ namespace ImGui
       }
     }
 
+    // Fit all visible nodes by centering their bounding box (imnodes has no zoom -> pan only).
+    auto fit_all = [&]()
+    {
+      ImVec2 mn(FLT_MAX, FLT_MAX);
+      ImVec2 mx(-FLT_MAX, -FLT_MAX);
+      bool any = false;
+      for (int i = 0; i < g->Nodes.Size; i++)
+      {
+        if (!show_live && g->Nodes.Data[i].IsLive)
+          continue;
+        const int id = g->Nodes.Data[i].Id;
+        const ImVec2 p = ImNodes::GetNodeGridSpacePos(id);
+        const ImVec2 d = ImNodes::GetNodeDimensions(id);
+        mn.x = ImMin(mn.x, p.x); mn.y = ImMin(mn.y, p.y);
+        mx.x = ImMax(mx.x, p.x + d.x); mx.y = ImMax(mx.y, p.y + d.y);
+        any = true;
+      }
+      if (any)
+      {
+        const ImVec2 center((mn.x + mx.x) * 0.5f, (mn.y + mx.y) * 0.5f);
+        ImNodes::EditorContextResetPanning(ImVec2(editor_size.x * 0.5f - center.x, editor_size.y * 0.5f - center.y));
+      }
+      return any;
+    };
+
+    // Fit a specific set of node ids by centering their grid-space bounding box.
+    auto fit_ids = [&](const ImVector<int>& ids)
+    {
+      ImVec2 mn(FLT_MAX, FLT_MAX);
+      ImVec2 mx(-FLT_MAX, -FLT_MAX);
+      bool any = false;
+      for (int i = 0; i < ids.Size; i++)
+      {
+        const ImGuiAppNode* sn = AppGraphFindNode(g, ids.Data[i]);
+        if (sn == nullptr || (!show_live && sn->IsLive))
+          continue;
+        const ImVec2 p = ImNodes::GetNodeGridSpacePos(ids.Data[i]);
+        const ImVec2 d = ImNodes::GetNodeDimensions(ids.Data[i]);
+        mn.x = ImMin(mn.x, p.x); mn.y = ImMin(mn.y, p.y);
+        mx.x = ImMax(mx.x, p.x + d.x); mx.y = ImMax(mx.y, p.y + d.y);
+        any = true;
+      }
+      if (any)
+      {
+        const ImVec2 center((mn.x + mx.x) * 0.5f, (mn.y + mx.y) * 0.5f);
+        ImNodes::EditorContextResetPanning(ImVec2(editor_size.x * 0.5f - center.x, editor_size.y * 0.5f - center.y));
+      }
+      return any;
+    };
+
+    // Navigation: F frames the selection's bounding box (all selected nodes); Home fits all nodes.
+    if (!ImGui::GetIO().WantTextInput && ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows))
+    {
+      if (ImGui::IsKeyPressed(ImGuiKey_F, false))
+      {
+        if (!fit_ids(g->Selection) && ImNodes::NumSelectedNodes() > 0)
+        {
+          int picked = 0;
+          ImNodes::GetSelectedNodes(&picked);
+          ImNodes::EditorContextMoveToNode(picked);
+        }
+      }
+      if (ImGui::IsKeyPressed(ImGuiKey_Home, false))
+        fit_all();
+      if (ImGui::IsKeyPressed(ImGuiKey_L, false) && !ImGui::GetIO().KeyCtrl)
+      {
+        AppGraphAutoLayout(g, show_live);
+        fit_all();
+      }
+      if (ImGui::IsKeyPressed(ImGuiKey_G, false))
+        s_snap_grid = !s_snap_grid;   // toggle snap-to-grid
+
+      // Nudge: arrow keys move the selected nodes by 1 grid unit (Shift = 10). Held = repeat.
+      {
+        const float step = ImGui::GetIO().KeyShift ? 10.0f : 1.0f;
+        ImVec2 d(0.0f, 0.0f);
+        if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow))  d.x -= step;
+        if (ImGui::IsKeyPressed(ImGuiKey_RightArrow)) d.x += step;
+        if (ImGui::IsKeyPressed(ImGuiKey_UpArrow))    d.y -= step;
+        if (ImGui::IsKeyPressed(ImGuiKey_DownArrow))  d.y += step;
+        if ((d.x != 0.0f || d.y != 0.0f) && g->Selection.Size > 0)
+        {
+          for (int i = 0; i < g->Selection.Size; i++)
+          {
+            ImGuiAppNode* sn = AppGraphFindNode(g, g->Selection.Data[i]);
+            if (sn == nullptr || (!show_live && sn->IsLive) || AppNodeHiddenByCollapse(g, sn->Id))
+              continue;
+            const ImVec2 np = ImNodes::GetNodeGridSpacePos(sn->Id) + d;
+            ImNodes::SetNodeGridSpacePos(sn->Id, np);
+            sn->GridPos = np;
+          }
+        }
+      }
+
+      // Z-order: '[' sends the selection to the back, ']' brings it to the front. imnodes draws in submission =
+      // g->Nodes order, so we restack by rebuilding the vector with the selected nodes moved to one end. Element
+      // moves are byte-copies (ImVector never frees element-owned memory), so inner buffers transfer cleanly.
+      if ((ImGui::IsKeyPressed(ImGuiKey_LeftBracket, false) || ImGui::IsKeyPressed(ImGuiKey_RightBracket, false)) && g->Selection.Size > 0)
+      {
+        const bool to_front = ImGui::IsKeyPressed(ImGuiKey_RightBracket, false);
+        ImVector<ImGuiAppNode> reordered;
+        reordered.reserve(g->Nodes.Size);
+        if (to_front)
+        {
+          for (int i = 0; i < g->Nodes.Size; i++) if (!AppIdInSet(g->Selection, g->Nodes.Data[i].Id)) reordered.push_back(g->Nodes.Data[i]);
+          for (int i = 0; i < g->Nodes.Size; i++) if (AppIdInSet(g->Selection, g->Nodes.Data[i].Id))  reordered.push_back(g->Nodes.Data[i]);
+        }
+        else
+        {
+          for (int i = 0; i < g->Nodes.Size; i++) if (AppIdInSet(g->Selection, g->Nodes.Data[i].Id))  reordered.push_back(g->Nodes.Data[i]);
+          for (int i = 0; i < g->Nodes.Size; i++) if (!AppIdInSet(g->Selection, g->Nodes.Data[i].Id)) reordered.push_back(g->Nodes.Data[i]);
+        }
+        g->Nodes.Size = 0;            // abandon the old elements (their inner buffers now live in `reordered`)
+        g->Nodes.swap(reordered);     // take the reordered buffer; `reordered` frees only the old outer array
+      }
+    }
+
     // Apply a deferred node-body button request (explode/collapse). Here -- after the canvas read-back -- it is
     // safe to add/remove nodes (the read-back already ran, so it never touches the un-submitted new nodes).
     if (pending_act != AppAct_None && pending_node >= 0)
@@ -2697,7 +3662,27 @@ namespace ImGui
       if (cn == nullptr)
         ImGui::CloseCurrentPopup();
       else if (cn->IsLive)
+      {
         ImGui::TextDisabled("live node (read-only)");
+        // Promote: spawn an editable design Control mirroring this live node's name + data type, so you can author
+        // against a running control. The design node renders as "promoted" once its emitted type matches the live one.
+        if (cn->Kind == ImGuiAppNodeKind_Control)
+        {
+          ImGui::Separator();
+          if (ImGui::MenuItem("Promote to design"))
+          {
+            char nm[IM_LABEL_SIZE];
+            char dt[IM_LABEL_SIZE];
+            ImStrncpy(nm, cn->Draft.Name, IM_ARRAYSIZE(nm));
+            ImStrncpy(dt, cn->DataTypeName, IM_ARRAYSIZE(dt));
+            const ImVec2 near_pos = cn->GridPos + ImVec2(260.0f, 0.0f);
+            ImGuiAppNode* d = AppGraphAddNode(g, ImGuiAppNodeKind_Control, nm[0] ? nm : "NewControl");
+            ImStrncpy(d->DataTypeName, dt, IM_ARRAYSIZE(d->DataTypeName));
+            AppGraphPlaceNode(g, d, &near_pos);
+            ctx_node_id = d->Id;
+          }
+        }
+      }
       else
       {
         ImGui::TextDisabled("%s", cn->Draft.Name[0] ? cn->Draft.Name : "(unnamed)");
@@ -2737,6 +3722,13 @@ namespace ImGui
           if (ImGuiAppNode* dup = AppGraphDuplicateNode(g, cn))
             ctx_node_id = dup->Id;
         }
+        // Save this node + its subtree as a reusable prefab (named after the node), instantiable from the palette.
+        if (cn->Kind != ImGuiAppNodeKind_Layer && ImGui::MenuItem("Save as prefab"))
+        {
+          ImVector<int> roots;
+          roots.push_back(cn->Id);
+          AppGraphSavePrefab(g, roots, cn->Draft.Name[0] ? cn->Draft.Name : "prefab");
+        }
         if (ImGui::MenuItem("Delete node"))
         {
           AppGraphRemoveNode(g, ctx_node_id);
@@ -2761,21 +3753,89 @@ namespace ImGui
     }
     if (ImGui::BeginPopup("##AppGraphAdd"))
     {
-      ImGui::TextDisabled("Add node");
-      ImGui::Separator();
-      ImGuiAppNode* added = nullptr;
-      if (ImGui::MenuItem("Control"))   added = AppGraphAddNode(g, ImGuiAppNodeKind_Control, "NewControl");
-      if (ImGui::MenuItem("Struct"))    added = AppGraphAddNode(g, ImGuiAppNodeKind_Struct,  "NewStruct");
-      if (ImGui::BeginMenu("Layer"))
+      // Type-to-filter add palette: focus the search on open; an active filter flattens to a searchable list.
+      static ImGuiTextFilter add_filter;
+      if (ImGui::IsWindowAppearing())
       {
-        if (ImGui::MenuItem("Task", nullptr, false, !AppGraphHasLayerType(g, ImGuiAppLayerType_Task)))       { added = AppGraphAddNode(g, ImGuiAppNodeKind_Layer, "TaskLayer");    added->LayerType = ImGuiAppLayerType_Task;    }
-        if (ImGui::MenuItem("Command", nullptr, false, !AppGraphHasLayerType(g, ImGuiAppLayerType_Command))) { added = AppGraphAddNode(g, ImGuiAppNodeKind_Layer, "CommandLayer"); added->LayerType = ImGuiAppLayerType_Command; }
-        if (ImGui::MenuItem("Status", nullptr, false, !AppGraphHasLayerType(g, ImGuiAppLayerType_Status)))   { added = AppGraphAddNode(g, ImGuiAppNodeKind_Layer, "StatusLayer");  added->LayerType = ImGuiAppLayerType_Status;  }
-        if (ImGui::MenuItem("Window", nullptr, false, !AppGraphHasLayerType(g, ImGuiAppLayerType_Window)))   { added = AppGraphAddNode(g, ImGuiAppNodeKind_Layer, "WindowLayer");  added->LayerType = ImGuiAppLayerType_Window;  }
-        ImGui::EndMenu();
+        add_filter.Clear();
+        ImGui::SetKeyboardFocusHere();
       }
-      if (ImGui::MenuItem("Window"))    added = AppGraphAddNode(g, ImGuiAppNodeKind_Window,  "Window");
-      if (ImGui::MenuItem("Sidebar"))   added = AppGraphAddNode(g, ImGuiAppNodeKind_Sidebar, "Sidebar");
+      ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
+      add_filter.Draw("##addsearch");
+      ImGui::Separator();
+
+      ImGuiAppNode* added = nullptr;
+      if (add_filter.IsActive())
+      {
+        struct AddItem { const char* Label; ImGuiAppNodeKind Kind; ImGuiAppLayerType Layer; bool IsLayer; };
+        static const AddItem items[] =
+        {
+          { "Control",       ImGuiAppNodeKind_Control, ImGuiAppLayerType_Task,    false },
+          { "Struct",        ImGuiAppNodeKind_Struct,  ImGuiAppLayerType_Task,    false },
+          { "Window",        ImGuiAppNodeKind_Window,  ImGuiAppLayerType_Task,    false },
+          { "Sidebar",       ImGuiAppNodeKind_Sidebar, ImGuiAppLayerType_Task,    false },
+          { "Task Layer",    ImGuiAppNodeKind_Layer,   ImGuiAppLayerType_Task,    true  },
+          { "Command Layer", ImGuiAppNodeKind_Layer,   ImGuiAppLayerType_Command, true  },
+          { "Status Layer",  ImGuiAppNodeKind_Layer,   ImGuiAppLayerType_Status,  true  },
+          { "Window Layer",  ImGuiAppNodeKind_Layer,   ImGuiAppLayerType_Window,  true  },
+        };
+        for (int i = 0; i < IM_ARRAYSIZE(items); i++)
+        {
+          if (!add_filter.PassFilter(items[i].Label))
+            continue;
+          const bool taken = items[i].IsLayer && AppGraphHasLayerType(g, items[i].Layer);
+          ImGui::BeginDisabled(taken);
+          if (ImGui::Selectable(items[i].Label))
+          {
+            const char* nm = items[i].IsLayer ? AppLayerNodeName(items[i].Layer)
+                           : items[i].Kind == ImGuiAppNodeKind_Control ? "NewControl"
+                           : items[i].Kind == ImGuiAppNodeKind_Struct  ? "NewStruct"
+                           : items[i].Kind == ImGuiAppNodeKind_Window   ? "Window" : "Sidebar";
+            added = AppGraphAddNode(g, items[i].Kind, nm);
+            if (items[i].IsLayer)
+              added->LayerType = items[i].Layer;
+          }
+          ImGui::EndDisabled();
+        }
+      }
+      else
+      {
+        if (ImGui::MenuItem("Control"))   added = AppGraphAddNode(g, ImGuiAppNodeKind_Control, "NewControl");
+        if (ImGui::MenuItem("Struct"))    added = AppGraphAddNode(g, ImGuiAppNodeKind_Struct,  "NewStruct");
+        if (ImGui::BeginMenu("Layer"))
+        {
+          if (ImGui::MenuItem("Task", nullptr, false, !AppGraphHasLayerType(g, ImGuiAppLayerType_Task)))       { added = AppGraphAddNode(g, ImGuiAppNodeKind_Layer, "TaskLayer");    added->LayerType = ImGuiAppLayerType_Task;    }
+          if (ImGui::MenuItem("Command", nullptr, false, !AppGraphHasLayerType(g, ImGuiAppLayerType_Command))) { added = AppGraphAddNode(g, ImGuiAppNodeKind_Layer, "CommandLayer"); added->LayerType = ImGuiAppLayerType_Command; }
+          if (ImGui::MenuItem("Status", nullptr, false, !AppGraphHasLayerType(g, ImGuiAppLayerType_Status)))   { added = AppGraphAddNode(g, ImGuiAppNodeKind_Layer, "StatusLayer");  added->LayerType = ImGuiAppLayerType_Status;  }
+          if (ImGui::MenuItem("Window", nullptr, false, !AppGraphHasLayerType(g, ImGuiAppLayerType_Window)))   { added = AppGraphAddNode(g, ImGuiAppNodeKind_Layer, "WindowLayer");  added->LayerType = ImGuiAppLayerType_Window;  }
+          ImGui::EndMenu();
+        }
+        if (ImGui::MenuItem("Window"))    added = AppGraphAddNode(g, ImGuiAppNodeKind_Window,  "Window");
+        if (ImGui::MenuItem("Sidebar"))   added = AppGraphAddNode(g, ImGuiAppNodeKind_Sidebar, "Sidebar");
+        ImGui::Separator();
+        if (ImGui::BeginMenu("New from template"))
+        {
+          if (ImGui::MenuItem("Empty app (layers + window)")) AppGraphLoadTemplate(g, 0);
+          if (ImGui::MenuItem("Window + control"))            AppGraphLoadTemplate(g, 1);
+          if (ImGui::MenuItem("Struct producer + consumer"))  AppGraphLoadTemplate(g, 2);
+          ImGui::EndMenu();
+        }
+        // Round-trip: reconstruct Struct nodes from C++ source on the clipboard (inverse of the struct codegen).
+        if (ImGui::MenuItem("Paste C++ struct(s)"))
+        {
+          if (const char* clip = ImGui::GetClipboardText())
+            AppGraphImportStructsFromCode(g, clip, add_popup_grid);
+        }
+        ImGui::SetItemTooltip("Parse 'struct Name { ... };' blocks from the clipboard into nodes");
+        // Prefabs: instantiate a previously saved subtree at the drop point.
+        if (AppGraphPrefabCount() > 0 && ImGui::BeginMenu("Prefabs"))
+        {
+          for (int i = 0; i < AppGraphPrefabCount(); i++)
+            if (ImGui::MenuItem(AppGraphPrefabName(i)))
+              AppGraphInstantiatePrefab(g, i, add_popup_grid);
+          ImGui::EndMenu();
+        }
+      }
       if (added != nullptr)
         AppGraphPlaceNode(g, added, &add_popup_grid);
       ImGui::EndPopup();
@@ -2783,6 +3843,78 @@ namespace ImGui
 
     char err[128];
     ImGui::CaptureAppGraphLinks(g, err, IM_ARRAYSIZE(err));
+
+    // Pin-drag-to-create: dragging a wire from a pin and releasing on empty canvas opens a kind-filtered palette
+    // (only node kinds that can legally connect to that pin) and, on pick, creates the node at the drop point and
+    // auto-wires it. IsLinkDropped reports the grabbed attribute; including_detached_links=false ignores re-drags.
+    static int    drop_src_attr = -1;
+    static ImVec2 drop_grid(0.0f, 0.0f);
+    {
+      int da = -1;
+      if (ImNodes::IsLinkDropped(&da, false) && da > 0)
+      {
+        drop_src_attr = da;
+        drop_grid = ImGui::GetIO().MousePos - ImGui::GetItemRectMin() - ImNodes::EditorContextGetPanning();
+        ImGui::OpenPopup("##AppGraphDropCreate");
+      }
+    }
+    if (ImGui::BeginPopup("##AppGraphDropCreate"))
+    {
+      ImGuiAppNode* sowner = nullptr;
+      ImGuiAppNodePort* sp = (drop_src_attr > 0) ? AppGraphFindPort(g, drop_src_attr, &sowner) : nullptr;
+      if (sp == nullptr || sowner == nullptr)
+      {
+        ImGui::CloseCurrentPopup();
+      }
+      else
+      {
+        ImGui::TextDisabled("from %s.%s", sowner->Draft.Name, sp->Name);
+        ImGui::Separator();
+
+        struct DropCand { const char* Label; ImGuiAppNodeKind Kind; ImGuiAppPortKind Comp; const char* Name; };
+        DropCand cands[2];
+        int      cand_count = 0;
+        switch (sp->Kind)
+        {
+        case ImGuiAppPortKind_DataOut:
+          cands[cand_count++] = { "Control (consumer)", ImGuiAppNodeKind_Control, ImGuiAppPortKind_DataIn, "NewControl" };
+          break;
+        case ImGuiAppPortKind_DataIn:
+          cands[cand_count++] = { "Struct (producer)", ImGuiAppNodeKind_Struct,  ImGuiAppPortKind_DataOut, "NewStruct" };
+          cands[cand_count++] = { "Control (producer)", ImGuiAppNodeKind_Control, ImGuiAppPortKind_DataOut, "NewControl" };
+          break;
+        case ImGuiAppPortKind_ChildOut:
+          cands[cand_count++] = { "Window (host)",  ImGuiAppNodeKind_Window,  ImGuiAppPortKind_ChildIn, "Window" };
+          cands[cand_count++] = { "Sidebar (host)", ImGuiAppNodeKind_Sidebar, ImGuiAppPortKind_ChildIn, "Sidebar" };
+          break;
+        case ImGuiAppPortKind_ChildIn:
+          if (sowner->Kind == ImGuiAppNodeKind_Struct)
+            cands[cand_count++] = { "Field", ImGuiAppNodeKind_Field, ImGuiAppPortKind_ChildOut, "field" };
+          else
+            cands[cand_count++] = { "Control (child)", ImGuiAppNodeKind_Control, ImGuiAppPortKind_ChildOut, "NewControl" };
+          break;
+        default:
+          break;
+        }
+
+        for (int c = 0; c < cand_count; c++)
+        {
+          if (!ImGui::Selectable(cands[c].Label))
+            continue;
+          ImGuiAppNode* nw = AppGraphAddNode(g, cands[c].Kind, cands[c].Name);
+          AppGraphPlaceNode(g, nw, &drop_grid);
+          const int comp = AppNodeFirstPortKind(nw, cands[c].Comp);
+          if (comp > 0 && AppGraphTryConnect(g, drop_src_attr, comp))
+          {
+            AppInferStructFieldType(g, drop_src_attr, comp);   // drop direction is unknown -> try both orderings
+            AppInferStructFieldType(g, comp, drop_src_attr);
+          }
+          drop_src_attr = -1;
+          ImGui::CloseCurrentPopup();
+        }
+      }
+      ImGui::EndPopup();
+    }
 
     // B1: transient link-rejection toast at the canvas bottom-left. The editor child is the last item after
     // EndNodeEditor; fade alpha over ~2.5s, the timer re-armed whenever LastLinkErrSeq changes (single owner).
@@ -2836,9 +3968,63 @@ namespace ImGui
         if (submitted && !canvas_originated)
         {
           ImNodes::ClearNodeSelection();
-          ImNodes::SelectNode(*selected_node_id);   // highlight only -- no auto-pan (it yanked the whole canvas)
+          ImNodes::SelectNode(*selected_node_id);
+          ImNodes::EditorContextMoveToNode(*selected_node_id);   // tree click jumps: outline AND frame the node
         }
         applied_sel = *selected_node_id;
+      }
+
+      // 4) Mirror the canvas multi-selection (imnodes box-select / Ctrl-click) into g->Selection, so the outliner
+      //    highlight, F-fit, and Ctrl+C all see the rubber-banded set -- not just the single primary node. Only
+      //    when the canvas actually has a selection, so a tree-driven multi-select survives an empty canvas.
+      const int multi = ImNodes::NumSelectedNodes();
+      if (multi > 0)
+      {
+        g->Selection.resize(multi);
+        ImNodes::GetSelectedNodes(g->Selection.Data);
+      }
+    }
+
+    // Clipboard + undo/redo keys (canvas focused, not typing). Ctrl+C copies the selected nodes' subtrees,
+    // Ctrl+V pastes them with fresh ids and a cascading offset. Ctrl+Z / Ctrl+(Shift+)Z / Ctrl+Y restore
+    // snapshots -- and clear the imnodes selection so it can't reference an id the snapshot dropped.
+    if (!ImGui::GetIO().WantTextInput && ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows) && ImGui::GetIO().KeyCtrl)
+    {
+      if (ImGui::IsKeyPressed(ImGuiKey_C, false))
+      {
+        ImVector<int> roots;
+        const int sel_count = ImNodes::NumSelectedNodes();
+        if (sel_count > 0)
+        {
+          roots.resize(sel_count);
+          ImNodes::GetSelectedNodes(roots.Data);
+        }
+        else if (selected_node_id != nullptr && *selected_node_id >= 0)
+        {
+          roots.push_back(*selected_node_id);
+        }
+        if (roots.Size > 0)
+          AppGraphCopySelection(g, roots);
+      }
+      if (ImGui::IsKeyPressed(ImGuiKey_V, false) && AppGraphClipboardHasData())
+        AppGraphPasteClipboard(g);
+    }
+
+    // Undo/redo: capture this frame's settled mutations, then honor Ctrl+Z / Ctrl+(Shift+)Z / Ctrl+Y.
+    AppGraphCheckpoint(g);
+    if (!ImGui::GetIO().WantTextInput && ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows) && ImGui::GetIO().KeyCtrl)
+    {
+      const bool redo = ImGui::IsKeyPressed(ImGuiKey_Y, false) || (ImGui::GetIO().KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z, false));
+      const bool undo = !ImGui::GetIO().KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z, false);
+      if (redo && AppGraphCanRedo(g))
+      {
+        AppGraphRedo(g);
+        ImNodes::ClearNodeSelection();
+      }
+      else if (undo && AppGraphCanUndo(g))
+      {
+        AppGraphUndo(g);
+        ImNodes::ClearNodeSelection();
       }
     }
   }
@@ -2857,6 +4043,193 @@ namespace ImGui
       ImFormatString(buf, buf_size, "sel: %s > %s [%s]", pn->Draft.Name, n->Draft.Name, tag);
     else
       ImFormatString(buf, buf_size, "sel: %s [%s]", n->Draft.Name, tag);
+  }
+
+  static void AppValidatePushIssue(ImVector<ImGuiAppGraphIssue>* out, int node_id, int severity, const char* fmt, ...)
+  {
+    ImGuiAppGraphIssue issue;
+    issue.NodeId = node_id;
+    issue.Severity = severity;
+    va_list args;
+    va_start(args, fmt);
+    ImFormatStringV(issue.Text, IM_ARRAYSIZE(issue.Text), fmt, args);
+    va_end(args);
+    out->push_back(issue);
+  }
+
+  // Check one field's type completeness, reporting against its owning node.
+  static void AppValidateField(ImVector<ImGuiAppGraphIssue>* out, const ImGuiAppNode* owner, const ImGuiAppFieldDesc* f, const char* list_name)
+  {
+    if (f->Type == ImGuiAppFieldType_Struct && f->StructType[0] == 0)
+      AppValidatePushIssue(out, owner->Id, 2, "%s.%s: struct field has no type set", owner->Draft.Name, f->Name);
+    if (f->Type == ImGuiAppFieldType_String && f->ArraySize <= 0)
+      AppValidatePushIssue(out, owner->Id, 1, "%s.%s: string field has no size", owner->Draft.Name, f->Name);
+    IM_UNUSED(list_name);
+  }
+
+  void AppGraphValidate(const ImGuiAppGraph* g, ImVector<ImGuiAppGraphIssue>* out)
+  {
+    IM_ASSERT(g != nullptr && out != nullptr);
+
+    for (int i = 0; i < g->Nodes.Size; i++)
+    {
+      const ImGuiAppNode* n = &g->Nodes.Data[i];
+      if (n->IsLive)
+        continue;
+
+      if (n->Draft.Name[0] == 0 && n->Kind != ImGuiAppNodeKind_Layer)
+        AppValidatePushIssue(out, n->Id, 1, "unnamed %s node", AppNodeKindName(n->Kind));
+
+      // Duplicate codegen type name across Control / Struct nodes (would collide in the emitted C++).
+      if ((n->Kind == ImGuiAppNodeKind_Control || n->Kind == ImGuiAppNodeKind_Struct) && n->Draft.Name[0])
+      {
+        char base[IM_LABEL_SIZE];
+        AppNodeBaseName(n, base, IM_ARRAYSIZE(base));
+        for (int j = 0; j < i; j++)
+        {
+          const ImGuiAppNode* m = &g->Nodes.Data[j];
+          if (m->IsLive || (m->Kind != ImGuiAppNodeKind_Control && m->Kind != ImGuiAppNodeKind_Struct))
+            continue;
+          char mbase[IM_LABEL_SIZE];
+          AppNodeBaseName(m, mbase, IM_ARRAYSIZE(mbase));
+          if (strcmp(base, mbase) == 0)
+          {
+            AppValidatePushIssue(out, n->Id, 2, "duplicate type name '%s'", base);
+            break;
+          }
+        }
+      }
+
+      if (n->Kind == ImGuiAppNodeKind_Struct)
+      {
+        if (AppGraphFieldNodeCount(g, n->Id, 0) == 0 && n->Draft.PersistFields.Size == 0)
+          AppValidatePushIssue(out, n->Id, 1, "struct '%s' has no fields", n->Draft.Name);
+        for (int f = 0; f < n->Draft.PersistFields.Size; f++)
+          AppValidateField(out, n, &n->Draft.PersistFields.Data[f], "field");
+      }
+      else if (n->Kind == ImGuiAppNodeKind_Field)
+      {
+        for (int f = 0; f < n->Draft.PersistFields.Size; f++)
+          AppValidateField(out, n, &n->Draft.PersistFields.Data[f], "field");
+      }
+      else if (n->Kind == ImGuiAppNodeKind_Control)
+      {
+        if (n->PersistStructId >= 0 && AppGraphFindNodeConst(g, n->PersistStructId) == nullptr)
+          AppValidatePushIssue(out, n->Id, 2, "control '%s': exploded PersistData struct is missing", n->Draft.Name);
+        if (n->TempStructId >= 0 && AppGraphFindNodeConst(g, n->TempStructId) == nullptr)
+          AppValidatePushIssue(out, n->Id, 2, "control '%s': exploded TempData struct is missing", n->Draft.Name);
+        for (int f = 0; f < n->Draft.PersistFields.Size; f++)
+          AppValidateField(out, n, &n->Draft.PersistFields.Data[f], "persist");
+        for (int f = 0; f < n->Draft.TempFields.Size; f++)
+          AppValidateField(out, n, &n->Draft.TempFields.Data[f], "temp");
+      }
+      else if (n->Kind == ImGuiAppNodeKind_Window || n->Kind == ImGuiAppNodeKind_Sidebar)
+      {
+        if (!AppGraphHostsControl(g, n->Id))
+          AppValidatePushIssue(out, n->Id, 1, "%s '%s' hosts no controls", AppNodeKindName(n->Kind), n->Draft.Name);
+      }
+    }
+
+    // Whole-graph: a data-dependency cycle blocks codegen entirely.
+    ImVector<int> order;
+    char err[160] = "";
+    if (!AppGraphTopoOrder(g, &order, err, IM_ARRAYSIZE(err)))
+      AppValidatePushIssue(out, -1, 2, "dependency cycle: %s", err[0] ? err : "controls form a loop");
+  }
+
+  // Render one field list as live mock widgets. Numeric state is kept in the window's ImGuiStorage keyed by the
+  // field id, so scrubbed values persist across frames; strings show a read-only box (mock layout, not wired).
+  static void AppMockRenderFields(const ImVector<ImGuiAppFieldDesc>& fields)
+  {
+    ImGuiStorage* st = ImGui::GetStateStorage();
+    for (int i = 0; i < fields.Size; i++)
+    {
+      const ImGuiAppFieldDesc* f = &fields.Data[i];
+      ImGui::PushID(i);
+      const ImGuiID id = ImGui::GetID(f->Name);
+      switch (f->Type)
+      {
+      case ImGuiAppFieldType_Bool:
+      {
+        bool v = st->GetBool(id, false);
+        if (ImGui::Checkbox(f->Name, &v)) st->SetBool(id, v);
+        break;
+      }
+      case ImGuiAppFieldType_Int:
+      {
+        int* p = st->GetIntRef(id, 0);
+        ImGui::DragInt(f->Name, p);
+        break;
+      }
+      case ImGuiAppFieldType_Float:
+      case ImGuiAppFieldType_Double:
+      {
+        float* p = st->GetFloatRef(id, 0.0f);
+        ImGui::DragFloat(f->Name, p, 0.01f);
+        break;
+      }
+      case ImGuiAppFieldType_Vec2:
+      {
+        float v[2] = { st->GetFloat(id, 0.0f), st->GetFloat(id + 1, 0.0f) };
+        if (ImGui::DragFloat2(f->Name, v, 0.01f)) { st->SetFloat(id, v[0]); st->SetFloat(id + 1, v[1]); }
+        break;
+      }
+      case ImGuiAppFieldType_Vec4:
+      {
+        float v[4] = { st->GetFloat(id, 0.0f), st->GetFloat(id + 1, 0.0f), st->GetFloat(id + 2, 0.0f), st->GetFloat(id + 3, 0.0f) };
+        if (ImGui::DragFloat4(f->Name, v, 0.01f)) { for (int k = 0; k < 4; k++) st->SetFloat(id + k, v[k]); }
+        break;
+      }
+      case ImGuiAppFieldType_String:
+      {
+        char dummy[1] = { 0 };
+        ImGui::InputTextWithHint(f->Name, "(text)", dummy, 1, ImGuiInputTextFlags_ReadOnly);
+        break;
+      }
+      default:
+        ImGui::LabelText(f->Name, "%s", f->StructType[0] ? f->StructType : "struct");
+        break;
+      }
+      ImGui::PopID();
+    }
+  }
+
+  void AppGraphRenderMockPanel(ImGuiAppGraph* g, int node_id)
+  {
+    IM_ASSERT(g != nullptr);
+
+    const ImGuiAppNode* n = node_id >= 0 ? AppGraphFindNodeConst(g, node_id) : nullptr;
+    if (n == nullptr)
+    {
+      ImGui::TextDisabled("Select a Control to preview its UI.");
+      return;
+    }
+    if (n->Kind != ImGuiAppNodeKind_Control)
+    {
+      ImGui::TextDisabled("Preview is for Control nodes (%s selected).", AppNodeKindName(n->Kind));
+      return;
+    }
+
+    ImGui::TextDisabled("mock: %s", n->Draft.Name[0] ? n->Draft.Name : "(unnamed)");
+    ImGui::Separator();
+
+    ImVector<ImGuiAppFieldDesc> persist;
+    ImVector<ImGuiAppFieldDesc> temp;
+    AppNodeEffectiveFields(g, n, 0, &persist);
+    AppNodeEffectiveFields(g, n, 1, &temp);
+
+    if (persist.Size == 0 && temp.Size == 0)
+    {
+      ImGui::TextDisabled("(no fields to preview -- add Persist/Temp fields)");
+      return;
+    }
+    if (persist.Size > 0)
+      AppMockRenderFields(persist);
+    if (temp.Size > 0)
+    {
+      ImGui::SeparatorText("temp");
+      AppMockRenderFields(temp);
+    }
   }
 
   //-----------------------------------------------------------------------------
@@ -3023,6 +4396,10 @@ namespace ImGui
     for (int li = 0; li < g->Links.Size; li++)
     {
       if (g->Links.Data[li].Kind != ImGuiAppEdgeKind_Data) continue;
+      // Only control -> control edges order controls. Struct / Field / persist-temp-tie producers are emitted
+      // before controls (separately), so they must NOT add in-degree (else the control never reaches zero).
+      const ImGuiAppNode* prod = AppGraphFindNodeConst(g, AppGraphPortOwnerId(g, g->Links.Data[li].StartAttr));
+      if (prod == nullptr || prod->Kind != ImGuiAppNodeKind_Control || prod->IsLive) continue;
       const int consumer = AppGraphPortOwnerId(g, g->Links.Data[li].EndAttr);
       const int ci = ctrl_index(consumer);
       if (ci >= 0) indeg.Data[ci]++;
@@ -3129,12 +4506,33 @@ namespace ImGui
       out->appendf("};\n\n");
     }
 
+    // PersistData/TempData type names. When exploded, follow the Struct node's ACTUAL name (so renaming it stays
+    // valid); else the inline <base>Data / <base>TempData. Used everywhere below instead of base + literal suffix.
+    char persist_type[IM_LABEL_SIZE];
+    char temp_type[IM_LABEL_SIZE];
+    if (persist_exploded)
+    {
+      AppNodeBaseName(AppGraphFindNodeConst(g, n->PersistStructId), persist_type, IM_ARRAYSIZE(persist_type));
+    }
+    else
+    {
+      ImFormatString(persist_type, IM_ARRAYSIZE(persist_type), "%sData", base);
+    }
+    if (temp_exploded)
+    {
+      AppNodeBaseName(AppGraphFindNodeConst(g, n->TempStructId), temp_type, IM_ARRAYSIZE(temp_type));
+    }
+    else
+    {
+      ImFormatString(temp_type, IM_ARRAYSIZE(temp_type), "%sTempData", base);
+    }
+
     // Dependency producers.
     ImVector<int> deps;
     AppGraphConsumerDeps(g, n->Id, &deps);
 
     // Control struct header with template dependency args.
-    out->appendf("struct %s : ImGuiAppControl<%sData, %sTempData", base, base, base);
+    out->appendf("struct %s : ImGuiAppControl<%s, %s", base, persist_type, temp_type);
     for (int d = 0; d < deps.Size; d++)
     {
       const ImGuiAppNode* dn = AppGraphFindNodeConst(g, deps.Data[d]);
@@ -3155,11 +4553,11 @@ namespace ImGui
       }
     };
 
-    out->appendf("  virtual void OnInitialize(ImGuiApp* app, %sData* data", base);
+    out->appendf("  virtual void OnInitialize(ImGuiApp* app, %s* data", persist_type);
     emit_dep_params(out);
     out->appendf(") const override final\n  {\n    IM_UNUSED(app); IM_UNUSED(data);\n    // TODO: initialize persistent data\n  }\n\n");
 
-    out->appendf("  virtual void OnGetCommand(const ImGuiApp* app, ImGuiAppCommand* cmd, const %sData* data, const %sTempData* temp_data", base, base);
+    out->appendf("  virtual void OnGetCommand(const ImGuiApp* app, ImGuiAppCommand* cmd, const %s* data, const %s* temp_data", persist_type, temp_type);
     emit_dep_params(out);
     out->appendf(") const override final\n  {\n    IM_UNUSED(app); IM_UNUSED(cmd); IM_UNUSED(data); IM_UNUSED(temp_data);\n");
     if (n->Commands.Size > 0)
@@ -3181,7 +4579,7 @@ namespace ImGui
       out->appendf("    // TODO: set *cmd when this control should request an app command\n");
     out->appendf("  }\n\n");
 
-    out->appendf("  virtual void OnUpdate(float dt, %sData* data, const %sTempData* temp_data, const %sTempData* last_temp_data", base, base, base);
+    out->appendf("  virtual void OnUpdate(float dt, %s* data, const %s* temp_data, const %s* last_temp_data", persist_type, temp_type, temp_type);
     emit_dep_params(out);
     out->appendf(") const override final\n  {\n    IM_UNUSED(dt); IM_UNUSED(data); IM_UNUSED(temp_data); IM_UNUSED(last_temp_data);\n");
     // Field bindings -> assignment lines.
@@ -3210,6 +4608,33 @@ namespace ImGui
             out->appendf("    data->%s = %s->%s;\n", dst_id, dparam, src_id);
           else if (dst_id[0] && src_id[0])
             out->appendf("    // WARNING: dropped binding %s = %s (type mismatch)\n", dst_id, src_id);
+        }
+
+        // Inferred bindings: a same-named, same-typed field present on BOTH a drafted producer and this consumer
+        // gets an auto-copy line -- no manual binding row needed. Skipped when an explicit binding already covers
+        // the destination (the explicit one wins) or the producer is builtin (its fields aren't known here).
+        if (!dn->IsBuiltin)
+        {
+          for (int cf = 0; cf < n->Draft.PersistFields.Size; cf++)
+          {
+            const ImGuiAppFieldDesc* cdesc = &n->Draft.PersistFields.Data[cf];
+            bool already = false;
+            for (int bi = 0; bi < g->Bindings.Size && !already; bi++)
+              if (g->Bindings.Data[bi].LinkId == link_id && strcmp(g->Bindings.Data[bi].DstField, cdesc->Name) == 0)
+                already = true;
+            if (already)
+              continue;
+            for (int pf = 0; pf < dn->Draft.PersistFields.Size; pf++)
+            {
+              const ImGuiAppFieldDesc* pdesc = &dn->Draft.PersistFields.Data[pf];
+              if (strcmp(pdesc->Name, cdesc->Name) != 0 || pdesc->Type != cdesc->Type)
+                continue;
+              char id[IM_LABEL_SIZE];
+              AppSanitizeIdentifier(id, IM_ARRAYSIZE(id), cdesc->Name);
+              out->appendf("    data->%s = %s->%s;   // inferred (name+type match)\n", id, dparam, id);
+              break;
+            }
+          }
         }
       }
     }
@@ -3244,7 +4669,7 @@ namespace ImGui
     }
     out->appendf("  }\n\n");
 
-    out->appendf("  virtual void OnRender(const %sData* data, %sTempData* temp_data", base, base);
+    out->appendf("  virtual void OnRender(const %s* data, %s* temp_data", persist_type, temp_type);
     emit_dep_params(out);
     out->appendf(") const override final\n  {\n    IM_UNUSED(data); IM_UNUSED(temp_data);\n    // TODO: render widgets, write temp_data\n  }\n};\n\n");
   }
@@ -3304,6 +4729,7 @@ namespace ImGui
         h = ImHashStr(fd->Name, 0, h);
         h = ImHashData(&fd->Type, sizeof(fd->Type), h);
         h = ImHashData(&fd->ArraySize, sizeof(fd->ArraySize), h);
+        h = ImHashStr(fd->StructType, 0, h);
       }
       for (int f = 0; f < n->Draft.TempFields.Size; f++)
       {
@@ -3311,6 +4737,7 @@ namespace ImGui
         h = ImHashStr(fd->Name, 0, h);
         h = ImHashData(&fd->Type, sizeof(fd->Type), h);
         h = ImHashData(&fd->ArraySize, sizeof(fd->ArraySize), h);
+        h = ImHashStr(fd->StructType, 0, h);
       }
       for (int c = 0; c < n->Commands.Size; c++)
         h = ImHashStr(n->Commands.Data[c].Name, 0, h);
@@ -3477,42 +4904,52 @@ namespace ImGui
   // [SECTION] Whole-graph persistence (SaveAppGraph / LoadAppGraph, legacy [Draft] ingest)
   //-----------------------------------------------------------------------------
 
+  // Emit one [Node] record (shared by whole-graph and subset serialization).
+  static void AppEmitNodeRecord(ImGuiTextBuffer* buf, const ImGuiAppNode* n)
+  {
+    buf->appendf("[Node]\n");
+    buf->appendf("Id=%d\n", n->Id);
+    buf->appendf("Kind=%d\n", (int)n->Kind);
+    buf->appendf("Name=%s\n", n->Draft.Name);
+    buf->appendf("Builtin=%d\n", n->IsBuiltin ? 1 : 0);
+    buf->appendf("Type=%s\n", n->TypeName);
+    buf->appendf("DataType=%s\n", n->DataTypeName);
+    buf->appendf("LayerType=%d\n", (int)n->LayerType);
+    buf->appendf("FieldList=%d\n", n->FieldList);
+    buf->appendf("PersistStruct=%d\n", n->PersistStructId);
+    buf->appendf("TempStruct=%d\n", n->TempStructId);
+    buf->appendf("Body=%d\n", n->BodyAttrId);
+    buf->appendf("Pos=%.1f,%.1f\n", n->GridPos.x, n->GridPos.y);
+    for (int p = 0; p < n->Ports.Size; p++)
+      buf->appendf("Port=%d,%d,%s,%u\n", n->Ports.Data[p].Id, (int)n->Ports.Data[p].Kind, n->Ports.Data[p].Name, (unsigned)n->Ports.Data[p].DataTypeId);
+    for (int f = 0; f < n->Draft.PersistFields.Size; f++)
+      buf->appendf("Persist=%s,%d,%d,%s\n", n->Draft.PersistFields.Data[f].Name, (int)n->Draft.PersistFields.Data[f].Type, n->Draft.PersistFields.Data[f].ArraySize, n->Draft.PersistFields.Data[f].StructType);
+    for (int f = 0; f < n->Draft.TempFields.Size; f++)
+      buf->appendf("Temp=%s,%d,%d,%s\n", n->Draft.TempFields.Data[f].Name, (int)n->Draft.TempFields.Data[f].Type, n->Draft.TempFields.Data[f].ArraySize, n->Draft.TempFields.Data[f].StructType);
+    for (int c = 0; c < n->Commands.Size; c++)
+      buf->appendf("Command=%s\n", n->Commands.Data[c].Name);
+  }
+
+  // Serialize the whole graph to the imgui-style text format (shared by SaveAppGraph for files and by the
+  // in-memory undo snapshots). Positions are included so undo restores layout, not just topology.
+  static void AppGraphSerialize(const ImGuiAppGraph* g, ImGuiTextBuffer* buf)
+  {
+    buf->appendf("[Graph]\n");
+    buf->appendf("NextId=%d\n", g->NextId);
+    for (int i = 0; i < g->Nodes.Size; i++)
+      AppEmitNodeRecord(buf, &g->Nodes.Data[i]);
+    for (int i = 0; i < g->Links.Size; i++)
+      buf->appendf("Link=%d,%d,%d,%d\n", g->Links.Data[i].Id, g->Links.Data[i].StartAttr, g->Links.Data[i].EndAttr, (int)g->Links.Data[i].Kind);
+    for (int i = 0; i < g->Bindings.Size; i++)
+      buf->appendf("Bind=%d,%s,%s\n", g->Bindings.Data[i].LinkId, g->Bindings.Data[i].DstField, g->Bindings.Data[i].SrcField);
+  }
+
   bool SaveAppGraph(const char* path, const ImGuiAppGraph* g)
   {
     IM_ASSERT(path != nullptr && g != nullptr);
 
     ImGuiTextBuffer buf;
-    buf.appendf("[Graph]\n");
-    buf.appendf("NextId=%d\n", g->NextId);
-    for (int i = 0; i < g->Nodes.Size; i++)
-    {
-      const ImGuiAppNode* n = &g->Nodes.Data[i];
-      buf.appendf("[Node]\n");
-      buf.appendf("Id=%d\n", n->Id);
-      buf.appendf("Kind=%d\n", (int)n->Kind);
-      buf.appendf("Name=%s\n", n->Draft.Name);
-      buf.appendf("Builtin=%d\n", n->IsBuiltin ? 1 : 0);
-      buf.appendf("Type=%s\n", n->TypeName);
-      buf.appendf("DataType=%s\n", n->DataTypeName);
-      buf.appendf("LayerType=%d\n", (int)n->LayerType);
-      buf.appendf("FieldList=%d\n", n->FieldList);
-      buf.appendf("PersistStruct=%d\n", n->PersistStructId);
-      buf.appendf("TempStruct=%d\n", n->TempStructId);
-      buf.appendf("Body=%d\n", n->BodyAttrId);
-      buf.appendf("Pos=%.1f,%.1f\n", n->GridPos.x, n->GridPos.y);
-      for (int p = 0; p < n->Ports.Size; p++)
-        buf.appendf("Port=%d,%d,%s,%u\n", n->Ports.Data[p].Id, (int)n->Ports.Data[p].Kind, n->Ports.Data[p].Name, (unsigned)n->Ports.Data[p].DataTypeId);
-      for (int f = 0; f < n->Draft.PersistFields.Size; f++)
-        buf.appendf("Persist=%s,%d,%d\n", n->Draft.PersistFields.Data[f].Name, (int)n->Draft.PersistFields.Data[f].Type, n->Draft.PersistFields.Data[f].ArraySize);
-      for (int f = 0; f < n->Draft.TempFields.Size; f++)
-        buf.appendf("Temp=%s,%d,%d\n", n->Draft.TempFields.Data[f].Name, (int)n->Draft.TempFields.Data[f].Type, n->Draft.TempFields.Data[f].ArraySize);
-      for (int c = 0; c < n->Commands.Size; c++)
-        buf.appendf("Command=%s\n", n->Commands.Data[c].Name);
-    }
-    for (int i = 0; i < g->Links.Size; i++)
-      buf.appendf("Link=%d,%d,%d,%d\n", g->Links.Data[i].Id, g->Links.Data[i].StartAttr, g->Links.Data[i].EndAttr, (int)g->Links.Data[i].Kind);
-    for (int i = 0; i < g->Bindings.Size; i++)
-      buf.appendf("Bind=%d,%s,%s\n", g->Bindings.Data[i].LinkId, g->Bindings.Data[i].DstField, g->Bindings.Data[i].SrcField);
+    AppGraphSerialize(g, &buf);
 
     ImFileHandle fh = ImFileOpen(path, "wt");
     if (fh == nullptr)
@@ -3574,18 +5011,14 @@ namespace ImGui
     }
   }
 
-  bool LoadAppGraph(const char* path, ImGuiAppGraph* g)
+  // Parse a serialized graph (mutable in-memory text, NUL-terminated) into g, replacing its contents. Shared by
+  // LoadAppGraph (file) and the in-memory undo snapshots. Does not free `data`.
+  static void AppGraphDeserialize(ImGuiAppGraph* g, char* data)
   {
-    IM_ASSERT(path != nullptr && g != nullptr);
-
-    size_t data_size = 0;
-    char* data = (char*)ImFileLoadToMemory(path, "rb", &data_size, 1);
-    if (data == nullptr)
-      return false;
-
     g->Nodes.clear();
     g->Links.clear();
     g->Bindings.clear();
+    g->Selection.clear();
     g->NextId = 1;
     g->EditingNodeId = -1;
 
@@ -3669,8 +5102,6 @@ namespace ImGui
     if (cur && legacy_needs_ports)
       AppGraphSynthesizeControlPorts(g, cur);
 
-    IM_FREE(data);
-
     AppGraphNormalizeLoadedPorts(g);
 
     // Drop links whose endpoints don't resolve to any port (e.g. legacy inert attr ids that no synthesized
@@ -3693,7 +5124,661 @@ namespace ImGui
     if (g->NextId <= max_id)
       g->NextId = max_id + 1;
     IM_UNUSED(is_legacy);
+  }
+
+  bool LoadAppGraph(const char* path, ImGuiAppGraph* g)
+  {
+    IM_ASSERT(path != nullptr && g != nullptr);
+
+    size_t data_size = 0;
+    char* data = (char*)ImFileLoadToMemory(path, "rb", &data_size, 1);
+    if (data == nullptr)
+      return false;
+
+    AppGraphDeserialize(g, data);
+    IM_FREE(data);
     return true;
+  }
+
+  bool AppGraphGenerateToFiles(const char* graph_path, const char* out_header_path)
+  {
+    IM_ASSERT(graph_path != nullptr && out_header_path != nullptr);
+
+    ImGuiAppGraph g;
+    if (!LoadAppGraph(graph_path, &g))
+      return false;
+
+    ImGuiTextBuffer buf;
+    GenerateAppGraphCode(&g, &buf);
+
+    ImFileHandle fh = ImFileOpen(out_header_path, "wt");
+    if (fh == nullptr)
+      return false;
+    ImFileWrite(buf.c_str(), sizeof(char), (ImU64)buf.size(), fh);
+    ImFileClose(fh);
+    return true;
+  }
+
+  // Split a buffer into NUL-terminated lines in place (replaces '\n', strips '\r'); fills `lines` with pointers.
+  static void AppDiffSplitLines(char* text, ImVector<const char*>* lines)
+  {
+    char* p = text;
+    lines->push_back(p);
+    while (*p != 0)
+    {
+      if (*p == '\n')
+      {
+        *p = 0;
+        if (p > text && p[-1] == '\r') p[-1] = 0;
+        lines->push_back(p + 1);
+      }
+      p++;
+    }
+  }
+
+  void AppGraphDiffCode(const ImGuiAppGraph* a, const ImGuiAppGraph* b, ImGuiTextBuffer* out)
+  {
+    IM_ASSERT(a != nullptr && b != nullptr && out != nullptr);
+
+    ImGuiTextBuffer ca, cb;
+    GenerateAppGraphCode(a, &ca);
+    GenerateAppGraphCode(b, &cb);
+
+    // Mutable copies for in-place line splitting.
+    const int la = ca.size();
+    const int lb = cb.size();
+    char* ta = (char*)IM_ALLOC((size_t)la + 1);
+    char* tb = (char*)IM_ALLOC((size_t)lb + 1);
+    memcpy(ta, ca.c_str(), (size_t)la + 1);
+    memcpy(tb, cb.c_str(), (size_t)lb + 1);
+
+    ImVector<const char*> A, B;
+    AppDiffSplitLines(ta, &A);
+    AppDiffSplitLines(tb, &B);
+
+    // LCS DP over lines (sizes are small -- generated headers, not whole programs).
+    const int n = A.Size;
+    const int m = B.Size;
+    ImVector<int> dp;
+    dp.resize((n + 1) * (m + 1));
+    for (int i = 0; i <= n; i++) dp[i * (m + 1) + m] = 0;
+    for (int j = 0; j <= m; j++) dp[n * (m + 1) + j] = 0;
+    for (int i = n - 1; i >= 0; i--)
+      for (int j = m - 1; j >= 0; j--)
+      {
+        if (strcmp(A[i], B[j]) == 0)
+          dp[i * (m + 1) + j] = dp[(i + 1) * (m + 1) + (j + 1)] + 1;
+        else
+          dp[i * (m + 1) + j] = ImMax(dp[(i + 1) * (m + 1) + j], dp[i * (m + 1) + (j + 1)]);
+      }
+
+    int i = 0, j = 0;
+    int added = 0, removed = 0;
+    while (i < n && j < m)
+    {
+      if (strcmp(A[i], B[j]) == 0)
+      {
+        out->appendf("  %s\n", A[i]);
+        i++; j++;
+      }
+      else if (dp[(i + 1) * (m + 1) + j] >= dp[i * (m + 1) + (j + 1)])
+      {
+        out->appendf("- %s\n", A[i]);
+        removed++; i++;
+      }
+      else
+      {
+        out->appendf("+ %s\n", B[j]);
+        added++; j++;
+      }
+    }
+    while (i < n) { out->appendf("- %s\n", A[i]); removed++; i++; }
+    while (j < m) { out->appendf("+ %s\n", B[j]); added++; j++; }
+
+    if (added == 0 && removed == 0)
+      out->appendf("\n(no differences)\n");
+    else
+      out->appendf("\n%d added, %d removed\n", added, removed);
+
+    IM_FREE(ta);
+    IM_FREE(tb);
+  }
+
+  //-----------------------------------------------------------------------------
+  // [SECTION] Round-trip: parse C++ struct blocks back into Struct nodes
+  //-----------------------------------------------------------------------------
+
+  static bool AppCImportIsSpace(char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; }
+  static bool AppCImportIsIdent(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'; }
+
+  // Map a C++ type spelling back to a field type. Unknown spellings become a Struct reference carrying the name.
+  static ImGuiAppFieldType AppFieldTypeFromCpp(const char* type, bool is_array, char* struct_type_out, int out_sz)
+  {
+    struct_type_out[0] = 0;
+    if (strcmp(type, "float") == 0)  return ImGuiAppFieldType_Float;
+    if (strcmp(type, "int") == 0)    return ImGuiAppFieldType_Int;
+    if (strcmp(type, "unsigned") == 0 || strcmp(type, "unsigned int") == 0 || strcmp(type, "ImU32") == 0 || strcmp(type, "ImGuiID") == 0) return ImGuiAppFieldType_Int;
+    if (strcmp(type, "bool") == 0)   return ImGuiAppFieldType_Bool;
+    if (strcmp(type, "double") == 0) return ImGuiAppFieldType_Double;
+    if (strcmp(type, "ImVec2") == 0) return ImGuiAppFieldType_Vec2;
+    if (strcmp(type, "ImVec4") == 0) return ImGuiAppFieldType_Vec4;
+    if (strcmp(type, "char") == 0 && is_array) return ImGuiAppFieldType_String;
+    ImStrncpy(struct_type_out, type, out_sz);
+    return ImGuiAppFieldType_Struct;
+  }
+
+  // Parse one "<type...> <name>[<N>]" member (text in [m, end)) and append it to the struct draft. Skips methods
+  // (parentheses), access specifiers, and anything without a clear "type name" shape.
+  static void AppImportParseMember(const char* m, const char* end, ImVector<ImGuiAppFieldDesc>* fields)
+  {
+    char buf[256];
+    int  bi = 0;
+    for (const char* c = m; c < end && bi < (int)sizeof(buf) - 1; c++)
+      buf[bi++] = *c;
+    buf[bi] = 0;
+
+    // Drop any initializer, and reject methods / labels / using-decls outright.
+    if (char* eq = strchr(buf, '='))
+      *eq = 0;
+    if (strchr(buf, '(') != nullptr || strchr(buf, ':') != nullptr)
+      return;
+
+    // Pull out an array size and strip the [..] so the trailing token is a clean name.
+    int  array_size = 0;
+    bool is_array = false;
+    if (char* lb = strchr(buf, '['))
+    {
+      is_array = true;
+      array_size = atoi(lb + 1);
+      *lb = 0;
+    }
+
+    // Tokenize by whitespace / '*' / '&'. Last token = field name, the rest joined = the type spelling.
+    char* words[16];
+    int   word_count = 0;
+    char* w = buf;
+    while (*w != 0 && word_count < 16)
+    {
+      while (*w != 0 && (AppCImportIsSpace(*w) || *w == '*' || *w == '&'))
+      {
+        *w = 0;
+        w++;
+      }
+      if (*w == 0)
+        break;
+      words[word_count++] = w;
+      while (*w != 0 && !AppCImportIsSpace(*w) && *w != '*' && *w != '&') w++;
+    }
+    if (word_count < 2)
+      return;   // need at least a type and a name
+
+    const char* name = words[word_count - 1];
+    if (!AppCImportIsIdent(name[0]) || (name[0] >= '0' && name[0] <= '9'))
+      return;
+    if (strcmp(name, "struct") == 0 || strcmp(name, "class") == 0)
+      return;
+
+    char type[IM_LABEL_SIZE];
+    int  ti = 0;
+    type[0] = 0;
+    for (int i = 0; i < word_count - 1; i++)
+    {
+      if (strcmp(words[i], "const") == 0 || strcmp(words[i], "struct") == 0)
+        continue;
+      if (ti > 0 && ti < IM_LABEL_SIZE - 1)
+        type[ti++] = ' ';
+      for (const char* c = words[i]; *c != 0 && ti < IM_LABEL_SIZE - 1; c++)
+        type[ti++] = *c;
+    }
+    type[ti] = 0;
+    if (type[0] == 0)
+      return;
+
+    ImGuiAppFieldDesc fd;
+    ImStrncpy(fd.Name, name, IM_ARRAYSIZE(fd.Name));
+    fd.Type = AppFieldTypeFromCpp(type, is_array, fd.StructType, IM_ARRAYSIZE(fd.StructType));
+    fd.ArraySize = (fd.Type == ImGuiAppFieldType_String) ? (array_size > 0 ? array_size : 32) : 0;
+    fields->push_back(fd);
+  }
+
+  int AppGraphImportStructsFromCode(ImGuiAppGraph* g, const char* code, ImVec2 origin)
+  {
+    IM_ASSERT(g != nullptr);
+    if (code == nullptr)
+      return 0;
+
+    int added = 0;
+    const char* p = code;
+    while ((p = strstr(p, "struct")) != nullptr)
+    {
+      // Require word boundaries around the keyword.
+      if (p != code && AppCImportIsIdent(p[-1]))     { p += 6; continue; }
+      const char* q = p + 6;
+      if (!AppCImportIsSpace(*q))                    { p = q; continue; }
+      while (AppCImportIsSpace(*q)) q++;
+
+      char name[IM_LABEL_SIZE];
+      int  ni = 0;
+      while (AppCImportIsIdent(*q) && ni < IM_LABEL_SIZE - 1) name[ni++] = *q++;
+      name[ni] = 0;
+      while (AppCImportIsSpace(*q)) q++;
+      if (ni == 0 || *q != '{')                      { p = q; continue; }   // fwd-decl / inheritance -> skip
+
+      const char* body = q + 1;
+      const char* e = body;
+      int depth = 1;
+      while (*e != 0 && depth > 0)
+      {
+        if (*e == '{') depth++;
+        else if (*e == '}') { depth--; if (depth == 0) break; }
+        e++;
+      }
+
+      ImGuiAppNode* s = AppGraphAddNode(g, ImGuiAppNodeKind_Struct, name);
+      ImVec2 pos = origin + ImVec2((float)(added % 4) * 300.0f, (float)(added / 4) * 220.0f);
+      AppGraphPlaceNode(g, s, &pos);
+
+      const char* m = body;
+      while (m < e)
+      {
+        const char* c = m;
+        while (c < e && *c != ';' && *c != '{')
+          c++;
+        if (c < e && *c == '{')
+        {
+          // Nested block (method/nested type): skip to its matching brace, then past a trailing ';'.
+          int d2 = 1;
+          c++;
+          while (c < e && d2 > 0) { if (*c == '{') d2++; else if (*c == '}') d2--; c++; }
+          while (c < e && *c != ';') c++;
+          m = (c < e) ? c + 1 : e;
+          continue;
+        }
+        AppImportParseMember(m, c, &s->Draft.PersistFields);
+        m = c + 1;
+      }
+
+      added++;
+      p = (*e != 0) ? e + 1 : e;
+    }
+    return added;
+  }
+
+  //-----------------------------------------------------------------------------
+  // [SECTION] Undo / redo (in-memory serialized snapshots)
+  //-----------------------------------------------------------------------------
+  // Each snapshot is a serialized-graph string (positions included). Linear history with a cursor at the live
+  // state; pushing after an undo truncates the redo tail. One shared history -- the demo edits a single graph --
+  // guarded by graph identity so switching graphs resets it. Snapshots are heap strings owned here.
+
+  namespace
+  {
+    struct AppUndoHistory
+    {
+      ImVector<char*>      Snaps;     // owned snapshot strings, oldest..newest
+      int                  Cursor;    // index of the snapshot matching the live graph (-1 = empty)
+      const ImGuiAppGraph* Owner;     // identity guard
+      ImGuiID              LiveHash;  // hash of Snaps[Cursor], for cheap change detection
+
+      AppUndoHistory() { Cursor = -1; Owner = nullptr; LiveHash = 0; }
+    };
+
+    AppUndoHistory g_app_undo;
+    const int      kAppUndoCap = 128;
+  }
+
+  static char* AppUndoSnapshot(const ImGuiAppGraph* g)
+  {
+    ImGuiTextBuffer buf;
+    AppGraphSerialize(g, &buf);
+    const int n = buf.size();
+    char* s = (char*)IM_ALLOC((size_t)n + 1);
+    memcpy(s, buf.c_str(), (size_t)n);
+    s[n] = 0;
+    return s;
+  }
+
+  static void AppUndoClear()
+  {
+    for (int i = 0; i < g_app_undo.Snaps.Size; i++)
+      IM_FREE(g_app_undo.Snaps.Data[i]);
+    g_app_undo.Snaps.clear();
+    g_app_undo.Cursor = -1;
+  }
+
+  // Drop the redo tail, append a new snapshot, and cap total depth from the front.
+  static void AppUndoPush(char* snap)
+  {
+    while (g_app_undo.Snaps.Size - 1 > g_app_undo.Cursor)
+    {
+      IM_FREE(g_app_undo.Snaps.Data[g_app_undo.Snaps.Size - 1]);
+      g_app_undo.Snaps.pop_back();
+    }
+    g_app_undo.Snaps.push_back(snap);
+    if (g_app_undo.Snaps.Size > kAppUndoCap)
+    {
+      IM_FREE(g_app_undo.Snaps.Data[0]);
+      g_app_undo.Snaps.erase(g_app_undo.Snaps.Data);
+    }
+    g_app_undo.Cursor = g_app_undo.Snaps.Size - 1;
+    g_app_undo.LiveHash = ImHashStr(snap);
+  }
+
+  static void AppUndoRestore(ImGuiAppGraph* g, int cursor)
+  {
+    const char* src = g_app_undo.Snaps.Data[cursor];
+    const int n = (int)strlen(src);
+    char* tmp = (char*)IM_ALLOC((size_t)n + 1);     // deserialize mutates the buffer in place
+    memcpy(tmp, src, (size_t)n + 1);
+    AppGraphDeserialize(g, tmp);
+    IM_FREE(tmp);
+    g_app_undo.Cursor = cursor;
+    g_app_undo.LiveHash = ImHashStr(src);
+  }
+
+  void AppGraphCheckpoint(ImGuiAppGraph* g)
+  {
+    IM_ASSERT(g != nullptr);
+
+    if (g_app_undo.Owner != g)
+    {
+      AppUndoClear();
+      g_app_undo.Owner = g;
+      AppUndoPush(AppUndoSnapshot(g));
+      return;
+    }
+    // Coalesce: don't snapshot mid-drag or mid-edit -- wait for the gesture to settle so one action == one step.
+    if (ImGui::IsMouseDown(ImGuiMouseButton_Left) || ImGui::IsAnyItemActive())
+      return;
+    char* snap = AppUndoSnapshot(g);
+    if (ImHashStr(snap) == g_app_undo.LiveHash)
+    {
+      IM_FREE(snap);
+      return;
+    }
+    AppUndoPush(snap);
+  }
+
+  bool AppGraphCanUndo(const ImGuiAppGraph* g) { return g_app_undo.Owner == g && g_app_undo.Cursor > 0; }
+  bool AppGraphCanRedo(const ImGuiAppGraph* g) { return g_app_undo.Owner == g && g_app_undo.Cursor >= 0 && g_app_undo.Cursor < g_app_undo.Snaps.Size - 1; }
+
+  void AppGraphUndo(ImGuiAppGraph* g)
+  {
+    if (AppGraphCanUndo(g))
+      AppUndoRestore(g, g_app_undo.Cursor - 1);
+  }
+
+  void AppGraphRedo(ImGuiAppGraph* g)
+  {
+    if (AppGraphCanRedo(g))
+      AppUndoRestore(g, g_app_undo.Cursor + 1);
+  }
+
+  int AppGraphHistoryCount(const ImGuiAppGraph* g) { return g_app_undo.Owner == g ? g_app_undo.Snaps.Size : 0; }
+  int AppGraphHistoryCursor(const ImGuiAppGraph* g) { return g_app_undo.Owner == g ? g_app_undo.Cursor : -1; }
+
+  void AppGraphHistoryGoto(ImGuiAppGraph* g, int index)
+  {
+    if (g_app_undo.Owner == g && index >= 0 && index < g_app_undo.Snaps.Size && index != g_app_undo.Cursor)
+      AppUndoRestore(g, index);
+  }
+
+  //-----------------------------------------------------------------------------
+  // [SECTION] Copy / paste (subtree clipboard with id remap)
+  //-----------------------------------------------------------------------------
+  // Copy serializes the selected roots + their containment subtrees (and the links/bindings internal to that
+  // set) into a clipboard string. Paste deserializes into a scratch graph, allocates fresh ids for every node /
+  // port / body-attr / link, offsets positions, and moves the records into the live graph. Works across graphs.
+
+  namespace
+  {
+    char* g_app_clip = nullptr;   // serialized partial graph, or null
+    int   g_app_clip_paste = 0;   // cascade counter so repeated pastes fan out instead of stacking
+  }
+
+  static bool AppIdInSet(const ImVector<int>& s, int id)
+  {
+    for (int i = 0; i < s.Size; i++)
+      if (s.Data[i] == id)
+        return true;
+    return false;
+  }
+
+  static int AppMapLookup(const ImVector<int>& olds, const ImVector<int>& news, int old_id)
+  {
+    for (int i = 0; i < olds.Size; i++)
+      if (olds.Data[i] == old_id)
+        return news.Data[i];
+    return -1;
+  }
+
+  // Add root + its containment descendants to `ids` (no duplicates). Mirrors AppGroupAccumulate's hierarchy.
+  static void AppGraphCollectSubtree(const ImGuiAppGraph* g, int root_id, ImVector<int>* ids)
+  {
+    if (AppIdInSet(*ids, root_id))
+      return;
+    const ImGuiAppNode* n = AppGraphFindNodeConst(g, root_id);
+    if (n == nullptr)
+      return;
+    ids->push_back(root_id);
+    if (n->Kind == ImGuiAppNodeKind_Window || n->Kind == ImGuiAppNodeKind_Sidebar)
+    {
+      for (int i = 0; i < g->Nodes.Size; i++)
+        if (g->Nodes.Data[i].Kind == ImGuiAppNodeKind_Control && AppGraphParentOf(g, g->Nodes.Data[i].Id) == root_id)
+          AppGraphCollectSubtree(g, g->Nodes.Data[i].Id, ids);
+    }
+    else if (n->Kind == ImGuiAppNodeKind_Control)
+    {
+      if (n->PersistStructId >= 0) AppGraphCollectSubtree(g, n->PersistStructId, ids);
+      if (n->TempStructId >= 0)    AppGraphCollectSubtree(g, n->TempStructId, ids);
+    }
+    else if (n->Kind == ImGuiAppNodeKind_Struct)
+    {
+      for (int i = 0; i < g->Nodes.Size; i++)
+        if (g->Nodes.Data[i].Kind == ImGuiAppNodeKind_Field && AppGraphParentOf(g, g->Nodes.Data[i].Id) == root_id)
+          AppGraphCollectSubtree(g, g->Nodes.Data[i].Id, ids);
+    }
+  }
+
+  static bool AppGraphClipboardHasData()
+  {
+    return g_app_clip != nullptr;
+  }
+
+  // Serialize the roots' subtrees (skipping layers/live nodes, which can't be pasted) into the clipboard.
+  // Serialize the roots' containment subtrees + their internal links/bindings to a heap string (caller frees),
+  // or null if nothing serializable. Shared by clipboard copy and prefab save.
+  static char* AppGraphSerializeSubsetString(const ImGuiAppGraph* g, const ImVector<int>& roots)
+  {
+    ImVector<int> ids;
+    for (int i = 0; i < roots.Size; i++)
+    {
+      const ImGuiAppNode* r = AppGraphFindNodeConst(g, roots.Data[i]);
+      if (r == nullptr || r->IsLive || r->Kind == ImGuiAppNodeKind_Layer)
+        continue;
+      AppGraphCollectSubtree(g, roots.Data[i], &ids);
+    }
+    if (ids.Size == 0)
+      return nullptr;
+
+    ImGuiTextBuffer buf;
+    buf.appendf("[Graph]\n");
+    for (int i = 0; i < g->Nodes.Size; i++)
+      if (AppIdInSet(ids, g->Nodes.Data[i].Id))
+        AppEmitNodeRecord(&buf, &g->Nodes.Data[i]);
+    for (int i = 0; i < g->Links.Size; i++)
+    {
+      const int a = AppGraphPortOwnerId(g, g->Links.Data[i].StartAttr);
+      const int b = AppGraphPortOwnerId(g, g->Links.Data[i].EndAttr);
+      if (AppIdInSet(ids, a) && AppIdInSet(ids, b))
+        buf.appendf("Link=%d,%d,%d,%d\n", g->Links.Data[i].Id, g->Links.Data[i].StartAttr, g->Links.Data[i].EndAttr, (int)g->Links.Data[i].Kind);
+    }
+    for (int i = 0; i < g->Bindings.Size; i++)
+    {
+      for (int li = 0; li < g->Links.Size; li++)
+      {
+        if (g->Links.Data[li].Id != g->Bindings.Data[i].LinkId)
+          continue;
+        const int a = AppGraphPortOwnerId(g, g->Links.Data[li].StartAttr);
+        const int b = AppGraphPortOwnerId(g, g->Links.Data[li].EndAttr);
+        if (AppIdInSet(ids, a) && AppIdInSet(ids, b))
+          buf.appendf("Bind=%d,%s,%s\n", g->Bindings.Data[i].LinkId, g->Bindings.Data[i].DstField, g->Bindings.Data[i].SrcField);
+        break;
+      }
+    }
+
+    const int n = buf.size();
+    char* s = (char*)IM_ALLOC((size_t)n + 1);
+    memcpy(s, buf.c_str(), (size_t)n);
+    s[n] = 0;
+    return s;
+  }
+
+  static void AppGraphCopySelection(const ImGuiAppGraph* g, const ImVector<int>& roots)
+  {
+    char* s = AppGraphSerializeSubsetString(g, roots);
+    if (s == nullptr)
+      return;
+    if (g_app_clip != nullptr)
+      IM_FREE(g_app_clip);
+    g_app_clip = s;
+    g_app_clip_paste = 0;
+  }
+
+  // Import a serialized partial graph into g with fresh ids for every node/port/body/link, offset positions, and
+  // a remapped selection. Shared by paste and prefab instantiation. Returns the number of nodes added.
+  static int AppGraphImportSerialized(ImGuiAppGraph* g, const char* serialized, ImVec2 offset)
+  {
+    if (serialized == nullptr)
+      return 0;
+
+    const int len = (int)strlen(serialized);
+    char* data = (char*)IM_ALLOC((size_t)len + 1);
+    memcpy(data, serialized, (size_t)len + 1);
+    ImGuiAppGraph tmp;
+    AppGraphDeserialize(&tmp, data);
+    IM_FREE(data);
+    if (tmp.Nodes.Size == 0)
+      return 0;
+
+    // Allocate fresh ids for every node, body-attr, and port; remember the old->new maps.
+    ImVector<int> old_node, new_node;
+    ImVector<int> old_port, new_port;
+    for (int i = 0; i < tmp.Nodes.Size; i++)
+    {
+      ImGuiAppNode* tn = &tmp.Nodes.Data[i];
+      old_node.push_back(tn->Id);
+      const int nid = g->NextId++;
+      new_node.push_back(nid);
+      tn->Id = nid;
+      tn->BodyAttrId = g->NextId++;
+      for (int p = 0; p < tn->Ports.Size; p++)
+      {
+        old_port.push_back(tn->Ports.Data[p].Id);
+        const int pid = g->NextId++;
+        new_port.push_back(pid);
+        tn->Ports.Data[p].Id = pid;
+      }
+    }
+
+    g->Selection.clear();
+    for (int i = 0; i < tmp.Nodes.Size; i++)
+    {
+      ImGuiAppNode* tn = &tmp.Nodes.Data[i];
+      if (tn->PersistStructId >= 0) tn->PersistStructId = AppMapLookup(old_node, new_node, tn->PersistStructId);
+      if (tn->TempStructId >= 0)    tn->TempStructId = AppMapLookup(old_node, new_node, tn->TempStructId);
+      tn->GridPos += offset;
+      tn->HasGridPos = true;
+      tn->_NeedsPlace = true;
+      tn->IsLive = false;
+      tn->LiveKey = 0;
+      g->Selection.push_back(tn->Id);
+      g->Nodes.push_back(*tn);     // MOVE: ImVector copies the bytes; tmp keeps no separate ownership of inner buffers
+    }
+
+    for (int i = 0; i < tmp.Links.Size; i++)
+    {
+      const int s = AppMapLookup(old_port, new_port, tmp.Links.Data[i].StartAttr);
+      const int e = AppMapLookup(old_port, new_port, tmp.Links.Data[i].EndAttr);
+      if (s < 0 || e < 0)
+        continue;
+      ImGuiAppNodeLink l = tmp.Links.Data[i];
+      const int old_link = l.Id;
+      l.Id = g->NextId++;
+      l.StartAttr = s;
+      l.EndAttr = e;
+      g->Links.push_back(l);
+      for (int bi = 0; bi < tmp.Bindings.Size; bi++)
+      {
+        if (tmp.Bindings.Data[bi].LinkId != old_link)
+          continue;
+        ImGuiAppFieldBinding b = tmp.Bindings.Data[bi];
+        b.LinkId = l.Id;
+        g->Bindings.push_back(b);
+      }
+    }
+
+    // tmp's nodes were moved into g (their inner ImVector buffers now belong to g). ImVector's destructor frees
+    // only the outer arrays, never element-owned memory, so clearing tmp here would not double-free -- but to be
+    // explicit that ownership has transferred, drop tmp's node count without touching the moved inner buffers.
+    tmp.Nodes.Size = 0;
+    return new_node.Size;
+  }
+
+  // Paste the clipboard into g with fresh ids and a cascading offset; selects the pasted roots. Returns count.
+  static int AppGraphPasteClipboard(ImGuiAppGraph* g)
+  {
+    if (g_app_clip == nullptr)
+      return 0;
+    const float step = 40.0f * (float)(++g_app_clip_paste);
+    return AppGraphImportSerialized(g, g_app_clip, ImVec2(step, step));
+  }
+
+  //-----------------------------------------------------------------------------
+  // [SECTION] Prefabs (named reusable subtrees)
+  //-----------------------------------------------------------------------------
+
+  namespace
+  {
+    struct AppPrefab
+    {
+      char  Name[64];
+      char* Data;   // serialized subtree, owned
+    };
+    ImVector<AppPrefab> g_app_prefabs;
+  }
+
+  void AppGraphSavePrefab(const ImGuiAppGraph* g, const ImVector<int>& roots, const char* name)
+  {
+    IM_ASSERT(g != nullptr && name != nullptr);
+    char* s = AppGraphSerializeSubsetString(g, roots);
+    if (s == nullptr)
+      return;
+
+    // Replace an existing prefab of the same name in place.
+    for (int i = 0; i < g_app_prefabs.Size; i++)
+      if (strcmp(g_app_prefabs.Data[i].Name, name) == 0)
+      {
+        IM_FREE(g_app_prefabs.Data[i].Data);
+        g_app_prefabs.Data[i].Data = s;
+        return;
+      }
+
+    AppPrefab pf;
+    ImStrncpy(pf.Name, name[0] ? name : "prefab", IM_ARRAYSIZE(pf.Name));
+    pf.Data = s;
+    g_app_prefabs.push_back(pf);
+  }
+
+  int         AppGraphPrefabCount() { return g_app_prefabs.Size; }
+  const char* AppGraphPrefabName(int index) { return (index >= 0 && index < g_app_prefabs.Size) ? g_app_prefabs.Data[index].Name : ""; }
+
+  int AppGraphInstantiatePrefab(ImGuiAppGraph* g, int index, ImVec2 origin)
+  {
+    IM_ASSERT(g != nullptr);
+    if (index < 0 || index >= g_app_prefabs.Size)
+      return 0;
+    return AppGraphImportSerialized(g, g_app_prefabs.Data[index].Data, origin);
   }
 
   //-----------------------------------------------------------------------------
@@ -3924,89 +6009,413 @@ namespace ImGui
   }
 
   //-----------------------------------------------------------------------------
-  // [SECTION] Scene-hierarchy tree (outliner)
+  // [SECTION] Scene-hierarchy tree (ECS-style outliner)
   //-----------------------------------------------------------------------------
+
+  static int AppTreeWindowLayerId(const ImGuiAppGraph* g)
+  {
+    for (int i = 0; i < g->Nodes.Size; i++)
+      if (g->Nodes.Data[i].Kind == ImGuiAppNodeKind_Layer && g->Nodes.Data[i].LayerType == ImGuiAppLayerType_Window)
+        return g->Nodes.Data[i].Id;
+    return -1;
+  }
+
+  static int AppTreeOwningControl(const ImGuiAppGraph* g, int struct_id)
+  {
+    for (int i = 0; i < g->Nodes.Size; i++)
+    {
+      const ImGuiAppNode* c = &g->Nodes.Data[i];
+      if (c->Kind == ImGuiAppNodeKind_Control && (c->PersistStructId == struct_id || c->TempStructId == struct_id))
+        return c->Id;
+    }
+    return -1;
+  }
+
+  // Outliner parent of a node (-1 = a root): windows nest under the Window layer; hosted controls under their
+  // window/sidebar; a control's exploded Persist/Temp structs under the control; fields under their struct.
+  static int AppNodeTreeParent(const ImGuiAppGraph* g, const ImGuiAppNode* n)
+  {
+    switch (n->Kind)
+    {
+    case ImGuiAppNodeKind_Window:
+      return AppTreeWindowLayerId(g);
+    case ImGuiAppNodeKind_Control:
+    {
+      const int p = AppGraphParentOf(g, n->Id);
+      const ImGuiAppNode* pn = p >= 0 ? AppGraphFindNodeConst(g, p) : nullptr;
+      return (pn != nullptr && (pn->Kind == ImGuiAppNodeKind_Window || pn->Kind == ImGuiAppNodeKind_Sidebar)) ? p : -1;
+    }
+    case ImGuiAppNodeKind_Struct:
+      return AppTreeOwningControl(g, n->Id);
+    case ImGuiAppNodeKind_Field:
+      return AppGraphParentOf(g, n->Id);
+    default:
+      return -1;
+    }
+  }
+
+  static int AppNodeFirstPortKind(const ImGuiAppNode* n, ImGuiAppPortKind kind)
+  {
+    for (int p = 0; p < n->Ports.Size; p++)
+      if (n->Ports.Data[p].Kind == kind)
+        return n->Ports.Data[p].Id;
+    return 0;
+  }
+
+  // Re-parent a node by moving its containment edge: a Control onto a Window/Sidebar (host it), or a Field onto a
+  // Struct. Removes the child's old containment edge, adds a new one (child ChildOut -> parent ChildIn).
+  static bool AppGraphReparent(ImGuiAppGraph* g, int child_id, int parent_id)
+  {
+    ImGuiAppNode* child  = AppGraphFindNode(g, child_id);
+    ImGuiAppNode* parent = AppGraphFindNode(g, parent_id);
+    if (child == nullptr || parent == nullptr || child == parent || child->IsLive || parent->IsLive)
+      return false;
+    const bool ok = (child->Kind == ImGuiAppNodeKind_Control && (parent->Kind == ImGuiAppNodeKind_Window || parent->Kind == ImGuiAppNodeKind_Sidebar))
+                 || (child->Kind == ImGuiAppNodeKind_Field   && parent->Kind == ImGuiAppNodeKind_Struct);
+    if (!ok)
+      return false;
+    const int cout = AppNodeFirstPortKind(child, ImGuiAppPortKind_ChildOut);
+    const int pin  = AppNodeFirstPortKind(parent, ImGuiAppPortKind_ChildIn);
+    if (cout == 0 || pin == 0)
+      return false;
+
+    for (int li = g->Links.Size - 1; li >= 0; li--)
+      if (g->Links.Data[li].Kind == ImGuiAppEdgeKind_Containment && g->Links.Data[li].StartAttr == cout)
+        g->Links.erase(g->Links.Data + li);
+
+    ImGuiAppNodeLink l;
+    l.Id = AppGraphAllocId(g);
+    l.StartAttr = cout;
+    l.EndAttr = pin;
+    l.Kind = ImGuiAppEdgeKind_Containment;
+    g->Links.push_back(l);
+    return true;
+  }
+
+  struct AppTreeCtx
+  {
+    int*  Sel;
+    bool  KindVisible[ImGuiAppNodeKind_COUNT];
+    int*  RenameNode;
+    bool* RenameFocus;
+    int   Act;        // 0 none / 1 delete / 2 duplicate / 3 explode / 4 collapse / 5 reparent
+    int   ActNode;
+    int   ActList;
+    int   ActTarget;  // reparent destination
+  };
+
+  static bool AppSelContains(const ImGuiAppGraph* g, int id)
+  {
+    for (int i = 0; i < g->Selection.Size; i++)
+      if (g->Selection.Data[i] == id)
+        return true;
+    return false;
+  }
+  static void AppSelToggle(ImGuiAppGraph* g, int id)
+  {
+    for (int i = 0; i < g->Selection.Size; i++)
+      if (g->Selection.Data[i] == id)
+      {
+        g->Selection.erase(g->Selection.Data + i);
+        return;
+      }
+    g->Selection.push_back(id);
+  }
+  static void AppSelSet(ImGuiAppGraph* g, int id)
+  {
+    g->Selection.clear();
+    if (id >= 0)
+      g->Selection.push_back(id);
+  }
+
+  // Click a tree row: Ctrl toggles it in the multi-selection; plain click selects only it. Primary (*Sel) follows.
+  static void AppTreeClick(ImGuiAppGraph* g, ImGuiAppNode* n, AppTreeCtx* c)
+  {
+    if (c->Sel == nullptr)
+      return;
+    if (ImGui::GetIO().KeyCtrl)
+      AppSelToggle(g, n->Id);
+    else
+      AppSelSet(g, n->Id);
+    *c->Sel = n->Id;
+  }
+
+  static void AppTreeRenderNode(ImGuiAppGraph* g, int node_id, AppTreeCtx* c);   // fwd (recursive)
+
+  // The right-click menu for a tree row -- records a deferred action (mutating g while iterating it is unsafe).
+  static void AppTreeContextMenu(ImGuiAppGraph* g, ImGuiAppNode* n, AppTreeCtx* c)
+  {
+    if (!ImGui::BeginPopupContextItem("##ctx"))
+      return;
+    if (n->IsLive)
+    {
+      ImGui::TextDisabled("live (read-only)");
+      ImGui::EndPopup();
+      return;
+    }
+    if (n->Kind != ImGuiAppNodeKind_Layer && ImGui::MenuItem("Rename"))   { *c->RenameNode = n->Id; *c->RenameFocus = true; }
+    if (n->Kind != ImGuiAppNodeKind_Layer && ImGui::MenuItem("Duplicate")) { c->Act = 2; c->ActNode = n->Id; }
+    if (ImGui::MenuItem("Delete"))                                         { c->Act = 1; c->ActNode = n->Id; }
+    if (n->Kind == ImGuiAppNodeKind_Struct && !n->IsBuiltin)
+    {
+      ImGui::Separator();
+      if (AppGraphFieldNodeCount(g, n->Id, 0) > 0)
+      {
+        if (ImGui::MenuItem("Collapse fields")) { c->Act = 4; c->ActNode = n->Id; c->ActList = 0; }
+      }
+      else if (ImGui::MenuItem("Explode fields", nullptr, false, n->Draft.PersistFields.Size > 0)) { c->Act = 3; c->ActNode = n->Id; c->ActList = 0; }
+    }
+    if (n->Kind == ImGuiAppNodeKind_Control && !n->IsBuiltin)
+    {
+      ImGui::Separator();
+      for (int list = 0; list < 2; list++)
+      {
+        const char* lbl = list == 0 ? "PersistData" : "TempData";
+        char item[64];
+        if (AppControlStructId(g, n, list == 1) >= 0)
+        {
+          ImFormatString(item, IM_ARRAYSIZE(item), "Collapse %s", lbl);
+          if (ImGui::MenuItem(item)) { c->Act = 4; c->ActNode = n->Id; c->ActList = list; }
+        }
+        else
+        {
+          ImFormatString(item, IM_ARRAYSIZE(item), "Explode %s", lbl);
+          if (ImGui::MenuItem(item)) { c->Act = 3; c->ActNode = n->Id; c->ActList = list; }
+        }
+      }
+    }
+    ImGui::EndPopup();
+  }
+
+  static void AppTreeRenderNode(ImGuiAppGraph* g, int node_id, AppTreeCtx* c)
+  {
+    ImGuiAppNode* n = AppGraphFindNode(g, node_id);
+    if (n == nullptr || !c->KindVisible[n->Kind])
+      return;
+
+    // Structural children = nodes whose tree-parent is this node.
+    ImVector<int> kids;
+    for (int i = 0; i < g->Nodes.Size; i++)
+      if (c->KindVisible[g->Nodes.Data[i].Kind] && AppNodeTreeParent(g, &g->Nodes.Data[i]) == n->Id)
+        kids.push_back(g->Nodes.Data[i].Id);
+
+    // Controls add component sub-rows: inline Persist/Temp (when not exploded), deps, commands.
+    const bool is_control = n->Kind == ImGuiAppNodeKind_Control && !n->IsBuiltin && !n->IsLive;
+    ImVector<int> deps;
+    if (is_control)
+      AppGraphConsumerDeps(g, n->Id, &deps);
+    const bool inline_persist = is_control && AppControlStructId(g, n, false) < 0;
+    const bool inline_temp    = is_control && AppControlStructId(g, n, true)  < 0;
+    const bool has_children = kids.Size > 0 || (is_control && (deps.Size > 0 || n->Commands.Size > 0 || inline_persist || inline_temp));
+
+    ImGui::PushID(n->Id);
+
+    if (c->RenameNode != nullptr && *c->RenameNode == n->Id && !n->IsLive)
+    {
+      ImGui::AlignTextToFramePadding();
+      ImGui::SetNextItemWidth(-FLT_MIN);
+      if (*c->RenameFocus)
+      {
+        ImGui::SetKeyboardFocusHere();
+        *c->RenameFocus = false;
+      }
+      if (ImGui::InputText("##rn", n->Draft.Name, IM_ARRAYSIZE(n->Draft.Name), ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll))
+        *c->RenameNode = -1;
+      if (ImGui::IsItemDeactivated())
+        *c->RenameNode = -1;
+      ImGui::PopID();
+      return;
+    }
+
+    ImGuiTreeNodeFlags f = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth | ImGuiTreeNodeFlags_DefaultOpen;
+    if (!has_children)
+      f |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_Bullet;
+    if (AppSelContains(g, n->Id) || (c->Sel != nullptr && *c->Sel == n->Id))
+      f |= ImGuiTreeNodeFlags_Selected;
+
+    const ImU32 tint = AppGraphOriginColor(n);
+    ImGui::PushStyleColor(ImGuiCol_Text, tint ? tint : AppKindColor(n->Kind));
+    const char* tag = n->IsLive ? " [live]" : n->IsPromoted ? " [promoted]" : "";
+    const bool open = ImGui::TreeNodeEx("##row", f, "%s%s", n->Draft.Name[0] ? n->Draft.Name : "(unnamed)", tag);
+    ImGui::PopStyleColor();
+
+    if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen())
+      AppTreeClick(g, n, c);
+    if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && !n->IsLive && c->RenameNode != nullptr)
+    {
+      *c->RenameNode = n->Id;
+      *c->RenameFocus = true;
+    }
+    AppTreeContextMenu(g, n, c);
+
+    // Drag-reparent: drag a Control onto a Window/Sidebar (host it), or a Field onto a Struct.
+    if (!n->IsLive && (n->Kind == ImGuiAppNodeKind_Control || n->Kind == ImGuiAppNodeKind_Field) && ImGui::BeginDragDropSource())
+    {
+      ImGui::SetDragDropPayload("APPNODE", &n->Id, sizeof(int));
+      ImGui::Text("%s", n->Draft.Name[0] ? n->Draft.Name : "(unnamed)");
+      ImGui::EndDragDropSource();
+    }
+    if (!n->IsLive && (n->Kind == ImGuiAppNodeKind_Window || n->Kind == ImGuiAppNodeKind_Sidebar || n->Kind == ImGuiAppNodeKind_Struct) && ImGui::BeginDragDropTarget())
+    {
+      if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("APPNODE"))
+      {
+        c->Act = 5;
+        c->ActNode = *(const int*)pl->Data;
+        c->ActTarget = n->Id;
+      }
+      ImGui::EndDragDropTarget();
+    }
+
+    if (open)
+    {
+      for (int i = 0; i < kids.Size; i++)
+        AppTreeRenderNode(g, kids.Data[i], c);
+
+      if (is_control)
+      {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetColorU32(ImGuiCol_TextDisabled));
+        if (inline_persist)
+          ImGui::BulletText("PersistData (%d fields)", n->Draft.PersistFields.Size);
+        if (inline_temp)
+          ImGui::BulletText("TempData (%d fields)", n->Draft.TempFields.Size);
+        ImGui::PopStyleColor();
+        if (deps.Size > 0 && ImGui::TreeNodeEx("##deps", ImGuiTreeNodeFlags_SpanAvailWidth, "deps (%d)", deps.Size))
+        {
+          for (int d = 0; d < deps.Size; d++)
+          {
+            const ImGuiAppNode* dn = AppGraphFindNodeConst(g, deps.Data[d]);
+            ImGui::BulletText("%s", dn != nullptr ? dn->Draft.Name : "(dep)");
+          }
+          ImGui::TreePop();
+        }
+        if (n->Commands.Size > 0 && ImGui::TreeNodeEx("##cmds", ImGuiTreeNodeFlags_SpanAvailWidth, "commands (%d)", n->Commands.Size))
+        {
+          for (int cm = 0; cm < n->Commands.Size; cm++)
+            ImGui::BulletText("%s", n->Commands.Data[cm].Name);
+          ImGui::TreePop();
+        }
+      }
+      ImGui::TreePop();
+    }
+    ImGui::PopID();
+  }
 
   void ShowAppGraphTree(const ImGuiApp* app, ImGuiAppGraph* g, int* selected_node_id)
   {
     IM_ASSERT(g != nullptr);
     IM_UNUSED(app);   // the graph already mirrors the live app, so it is the single outliner source (#16)
 
-    // Grouped outliner: Layers / Sidebars / Controls / App sections, every row selectable + origin-tinted.
-    // Window nodes are NOT a separate section -- they nest under the Window-layer node (ImGuiAppWindowLayer
-    // owns the windows).
-    auto Row = [&](ImGuiAppNode* n)
+    static int  s_rename = -1;
+    static bool s_rename_focus = false;
+    static bool s_kind_vis[ImGuiAppNodeKind_COUNT] = { true, true, true, true, true, true, true };
+
+    // Kind filter chips: toggle visibility of a kind (colored when on).
+    static const struct { ImGuiAppNodeKind Kind; const char* Tag; } chips[] =
     {
-      const char* tag = n->IsLive ? " [live]" : n->IsPromoted ? " [promoted]" : "";
-      char label[IM_LABEL_SIZE + 32];
-      ImFormatString(label, IM_ARRAYSIZE(label), "%s%s##n%d", n->Draft.Name[0] ? n->Draft.Name : "(unnamed)", tag, n->Id);
-      const bool selrow = selected_node_id && *selected_node_id == n->Id;
-      const ImU32 tint = AppGraphOriginColor(n);   // same constants as the canvas tint + legend
-      if (tint) ImGui::PushStyleColor(ImGuiCol_Text, tint);
-      if (ImGui::Selectable(label, selrow) && selected_node_id) *selected_node_id = n->Id;
-      if (tint) ImGui::PopStyleColor();
+      { ImGuiAppNodeKind_Layer, "L" }, { ImGuiAppNodeKind_Window, "W" }, { ImGuiAppNodeKind_Sidebar, "S" },
+      { ImGuiAppNodeKind_Control, "C" }, { ImGuiAppNodeKind_Struct, "T" }, { ImGuiAppNodeKind_Field, "F" },
     };
-    auto CountKind = [&](ImGuiAppNodeKind k) { int c = 0; for (int i = 0; i < g->Nodes.Size; i++) if (g->Nodes.Data[i].Kind == k) c++; return c; };
-
-    bool window_layer_exists = false;
-    for (int i = 0; i < g->Nodes.Size; i++)
-      if (g->Nodes.Data[i].Kind == ImGuiAppNodeKind_Layer && g->Nodes.Data[i].LayerType == ImGuiAppLayerType_Window)
-      { window_layer_exists = true; break; }
-
-    // Layers -- the Window layer hosts the window nodes as nested children.
-    if (ImGui::TreeNodeEx("##layers", ImGuiTreeNodeFlags_DefaultOpen, "Layers (%d)", CountKind(ImGuiAppNodeKind_Layer)))
+    for (int i = 0; i < IM_ARRAYSIZE(chips); i++)
     {
+      if (i > 0) ImGui::SameLine(0.0f, 3.0f);
+      const bool on = s_kind_vis[chips[i].Kind];
+      ImGui::PushID(i);
+      if (AppBlToggleChip("##chip", chips[i].Tag, on, AppKindColor(chips[i].Kind)))
+        s_kind_vis[chips[i].Kind] = !on;
+      ImGui::PopID();
+      ImGui::SetItemTooltip("%s", AppNodeKindName(chips[i].Kind));
+    }
+
+    // Search box: name filter. When active, results are shown flat (vs the browse hierarchy).
+    static ImGuiTextFilter filter;
+    ImGui::SetNextItemWidth(-ImGui::GetFontSize() * 2.0f);
+    filter.Draw("##search");
+    ImGui::SameLine();
+    if (AppRowDeleteButton("##clearsearch"))
+      filter.Clear();
+
+    AppTreeCtx ctx;
+    ctx.Sel = selected_node_id;
+    ctx.RenameNode = &s_rename;
+    ctx.RenameFocus = &s_rename_focus;
+    ctx.Act = 0;
+    ctx.ActNode = -1;
+    ctx.ActList = 0;
+    ctx.ActTarget = -1;
+    for (int k = 0; k < ImGuiAppNodeKind_COUNT; k++)
+      ctx.KindVisible[k] = s_kind_vis[k];
+
+    ImGui::Separator();
+    if (filter.IsActive())
+    {
+      // Flat filtered results (kind-visible + name match).
       for (int i = 0; i < g->Nodes.Size; i++)
       {
         ImGuiAppNode* n = &g->Nodes.Data[i];
-        if (n->Kind != ImGuiAppNodeKind_Layer) continue;
-
-        if (n->LayerType == ImGuiAppLayerType_Window)
-        {
-          const char* tag = n->IsLive ? " [live]" : n->IsPromoted ? " [promoted]" : "";
-          char label[IM_LABEL_SIZE + 32];
-          ImFormatString(label, IM_ARRAYSIZE(label), "%s%s##n%d", n->Draft.Name[0] ? n->Draft.Name : "(unnamed)", tag, n->Id);
-          ImGuiTreeNodeFlags f = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth | ImGuiTreeNodeFlags_DefaultOpen;
-          if (selected_node_id && *selected_node_id == n->Id) f |= ImGuiTreeNodeFlags_Selected;
-          const ImU32 tint = AppGraphOriginColor(n);
-          if (tint) ImGui::PushStyleColor(ImGuiCol_Text, tint);
-          const bool open = ImGui::TreeNodeEx(label, f);
-          if (tint) ImGui::PopStyleColor();
-          if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen() && selected_node_id) *selected_node_id = n->Id;
-          if (open)
-          {
-            for (int wj = 0; wj < g->Nodes.Size; wj++)
-              if (g->Nodes.Data[wj].Kind == ImGuiAppNodeKind_Window) Row(&g->Nodes.Data[wj]);
-            ImGui::TreePop();
-          }
-        }
-        else
-          Row(n);
+        if (!ctx.KindVisible[n->Kind] || !filter.PassFilter(n->Draft.Name))
+          continue;
+        ImGui::PushID(n->Id);
+        const ImU32 tint = AppGraphOriginColor(n);
+        ImGui::PushStyleColor(ImGuiCol_Text, tint ? tint : AppKindColor(n->Kind));
+        char label[IM_LABEL_SIZE + 24];
+        ImFormatString(label, IM_ARRAYSIZE(label), "%s  (%s)", n->Draft.Name[0] ? n->Draft.Name : "(unnamed)", AppNodeKindName(n->Kind));
+        if (ImGui::Selectable(label, AppSelContains(g, n->Id) || (selected_node_id && *selected_node_id == n->Id)))
+          AppTreeClick(g, n, &ctx);
+        ImGui::PopStyleColor();
+        AppTreeContextMenu(g, n, &ctx);
+        ImGui::PopID();
       }
-      ImGui::TreePop();
+    }
+    else
+    {
+      // Browse hierarchy: render every root (tree-parent == -1) recursively.
+      for (int i = 0; i < g->Nodes.Size; i++)
+        if (AppNodeTreeParent(g, &g->Nodes.Data[i]) == -1)
+          AppTreeRenderNode(g, g->Nodes.Data[i].Id, &ctx);
     }
 
-    // Windows fallback: only when there is no Window layer to host them (so they're never lost).
-    if (!window_layer_exists && CountKind(ImGuiAppNodeKind_Window) > 0)
-      if (ImGui::TreeNodeEx("##windows", ImGuiTreeNodeFlags_DefaultOpen, "Windows (%d)", CountKind(ImGuiAppNodeKind_Window)))
-      { for (int i = 0; i < g->Nodes.Size; i++) if (g->Nodes.Data[i].Kind == ImGuiAppNodeKind_Window) Row(&g->Nodes.Data[i]); ImGui::TreePop(); }
-
-    if (ImGui::TreeNodeEx("##sidebars", ImGuiTreeNodeFlags_DefaultOpen, "Sidebars (%d)", CountKind(ImGuiAppNodeKind_Sidebar)))
-    { for (int i = 0; i < g->Nodes.Size; i++) if (g->Nodes.Data[i].Kind == ImGuiAppNodeKind_Sidebar) Row(&g->Nodes.Data[i]); ImGui::TreePop(); }
-
-    if (ImGui::TreeNodeEx("##controls", ImGuiTreeNodeFlags_DefaultOpen, "Controls (%d)", CountKind(ImGuiAppNodeKind_Control)))
-    { for (int i = 0; i < g->Nodes.Size; i++) if (g->Nodes.Data[i].Kind == ImGuiAppNodeKind_Control) Row(&g->Nodes.Data[i]); ImGui::TreePop(); }
-
-    if (CountKind(ImGuiAppNodeKind_Struct) > 0)
-      if (ImGui::TreeNodeEx("##structs", ImGuiTreeNodeFlags_DefaultOpen, "Structs (%d)", CountKind(ImGuiAppNodeKind_Struct)))
-      { for (int i = 0; i < g->Nodes.Size; i++) if (g->Nodes.Data[i].Kind == ImGuiAppNodeKind_Struct) Row(&g->Nodes.Data[i]); ImGui::TreePop(); }
-
-    if (CountKind(ImGuiAppNodeKind_Field) > 0)
-      if (ImGui::TreeNodeEx("##fields", ImGuiTreeNodeFlags_DefaultOpen, "Fields (%d)", CountKind(ImGuiAppNodeKind_Field)))
-      { for (int i = 0; i < g->Nodes.Size; i++) if (g->Nodes.Data[i].Kind == ImGuiAppNodeKind_Field) Row(&g->Nodes.Data[i]); ImGui::TreePop(); }
-
-    if (CountKind(ImGuiAppNodeKind_App) > 0)
-      if (ImGui::TreeNodeEx("##app", ImGuiTreeNodeFlags_DefaultOpen, "App (%d)", CountKind(ImGuiAppNodeKind_App)))
-      { for (int i = 0; i < g->Nodes.Size; i++) if (g->Nodes.Data[i].Kind == ImGuiAppNodeKind_App) Row(&g->Nodes.Data[i]); ImGui::TreePop(); }
+    // Apply the deferred row action (now safe to mutate g->Nodes).
+    if (ctx.Act != 0 && ctx.ActNode >= 0)
+    {
+      ImGuiAppNode* an = AppGraphFindNode(g, ctx.ActNode);
+      if (an != nullptr)
+      {
+        if (ctx.Act == 1)
+        {
+          // Delete the whole multi-selection if the acted node is part of it; else just that node.
+          ImVector<int> victims;
+          if (AppSelContains(g, ctx.ActNode) && g->Selection.Size > 1)
+            victims = g->Selection;
+          else
+            victims.push_back(ctx.ActNode);
+          for (int v = 0; v < victims.Size; v++)
+          {
+            const ImGuiAppNode* vn = AppGraphFindNode(g, victims.Data[v]);
+            if (vn != nullptr && !vn->IsLive)
+              AppGraphRemoveNode(g, victims.Data[v]);
+          }
+          g->Selection.clear();
+          if (selected_node_id) *selected_node_id = -1;
+        }
+        else if (ctx.Act == 2)
+        {
+          AppGraphDuplicateNode(g, an);
+        }
+        else if (ctx.Act == 3)
+        {
+          if (an->Kind == ImGuiAppNodeKind_Control) AppGraphExplodeControlData(g, an, ctx.ActList == 1);
+          else                                      AppGraphExplodeFields(g, an, ctx.ActList);
+        }
+        else if (ctx.Act == 4)
+        {
+          if (an->Kind == ImGuiAppNodeKind_Control) AppGraphCollapseControlData(g, an, ctx.ActList == 1);
+          else                                      AppGraphCollapseFields(g, an, ctx.ActList);
+        }
+        else if (ctx.Act == 5)
+        {
+          AppGraphReparent(g, ctx.ActNode, ctx.ActTarget);
+        }
+      }
+    }
   }
 }
