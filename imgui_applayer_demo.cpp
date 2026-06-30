@@ -203,6 +203,36 @@ namespace
     }
   };
 
+  // A window-hosted control: renders INSIDE its host window (child content, no Begin/End). Hosted on BaseWindow,
+  // it exercises the live mirror's hosted-control + containment edge (control -> BaseWindow) in the editor.
+  struct BaseInfoData
+  {
+    int Frames;   // alive-frame counter, advanced in OnUpdate
+  };
+  struct BaseInfoTempData {};
+  struct BaseInfoControl : ImGuiAppControl<BaseInfoData, BaseInfoTempData>
+  {
+    virtual void OnInitialize(ImGuiApp*, BaseInfoData* data) const override final
+    {
+      data->Frames = 0;
+    }
+
+    virtual void OnUpdate(float dt, BaseInfoData* data, const BaseInfoTempData* temp_data, const BaseInfoTempData* last_temp_data) const override final
+    {
+      IM_UNUSED(dt);
+      IM_UNUSED(temp_data);
+      IM_UNUSED(last_temp_data);
+      data->Frames++;
+    }
+
+    virtual void OnRender(const BaseInfoData* data, BaseInfoTempData* temp_data) const override final
+    {
+      IM_UNUSED(temp_data);
+      ImGui::Separator();
+      ImGui::Text("Hosted control: %d frames alive", data->Frames);
+    }
+  };
+
   struct StatusBar : ImGuiAppSidebar<StatusBar>
   {
     virtual void OnRender(const ImGuiApp*) const override final
@@ -243,6 +273,7 @@ namespace
       if (ImGui::MenuItem("Window", nullptr, false, !ImGui::AppGraphHasLayerType(graph, ImGuiAppLayerType_Window)))   { ImGuiAppNode* n = ImGui::AppGraphAddNode(graph, ImGuiAppNodeKind_Layer, "WindowLayer");  n->LayerType = ImGuiAppLayerType_Window;  }
       ImGui::EndMenu();
     }
+    if (ImGui::MenuItem("Struct"))  ImGui::AppGraphAddNode(graph, ImGuiAppNodeKind_Struct,  "NewStruct");
     if (ImGui::MenuItem("Window"))  ImGui::AppGraphAddNode(graph, ImGuiAppNodeKind_Window,  "Window");
     if (ImGui::MenuItem("Sidebar")) ImGui::AppGraphAddNode(graph, ImGuiAppNodeKind_Sidebar, "Sidebar");
   }
@@ -702,44 +733,57 @@ namespace
 
           if (ImGui::BeginChild("##CodePanel", ImVec2(col_w, code_h), ImGuiChildFlags_Borders))
           {
-            ImGui::AlignTextToFramePadding();
-            if (data->HasCode)
+            if (ImGui::BeginTabBar("##bottomtabs"))
             {
-              ImGui::TextDisabled("Generated C++ - %s", data->CodeName);
-            }
-            else
-            {
-              ImGui::TextDisabled("Generated C++");
-            }
-            if (data->CodeText.size() > 0)
-            {
-              ImGui::SameLine();
-              if (ImGui::SmallButton("Copy"))
+              if (ImGui::BeginTabItem("Inspector"))
               {
-                ImGui::SetClipboardText(data->CodeText.c_str());
+                ImGui::EditAppNodeInspector(graph, selection);   // edit the selected node's data (name / fields / props)
+                ImGui::EndTabItem();
               }
-            }
-            if (doc->WriteMsg[0])
-            {
-              ImGui::SameLine();
-              ImGui::TextColored(ImVec4(0.45f,0.85f,0.45f,1.0f), "%s", doc->WriteMsg);
-            }
-            if (!data->HasCode)
-            {
-              ImGui::TextDisabled("Select a node to see its generated code.");
-            }
-            else
-            {
-              // Monospace so space-padded column alignment (e.g. the generated enum '=' column) lines up.
-              if (g_AppCodeFont)
+              if (ImGui::BeginTabItem("Generated C++"))
               {
-                ImGui::PushFont(g_AppCodeFont, 0.0f);
+                ImGui::AlignTextToFramePadding();
+                if (data->HasCode)
+                {
+                  ImGui::TextDisabled("Generated C++ - %s", data->CodeName);
+                }
+                else
+                {
+                  ImGui::TextDisabled("Generated C++");
+                }
+                if (data->CodeText.size() > 0)
+                {
+                  ImGui::SameLine();
+                  if (ImGui::SmallButton("Copy"))
+                  {
+                    ImGui::SetClipboardText(data->CodeText.c_str());
+                  }
+                }
+                if (doc->WriteMsg[0])
+                {
+                  ImGui::SameLine();
+                  ImGui::TextColored(ImVec4(0.45f,0.85f,0.45f,1.0f), "%s", doc->WriteMsg);
+                }
+                if (!data->HasCode)
+                {
+                  ImGui::TextDisabled("Select a node to see its generated code.");
+                }
+                else
+                {
+                  // Monospace so space-padded column alignment (e.g. the generated enum '=' column) lines up.
+                  if (g_AppCodeFont)
+                  {
+                    ImGui::PushFont(g_AppCodeFont, 0.0f);
+                  }
+                  ImGui::InputTextMultiline("##code", data->CodeText.Buf.Data, (size_t)data->CodeText.Buf.Capacity, ImVec2(-FLT_MIN, -FLT_MIN), ImGuiInputTextFlags_ReadOnly);
+                  if (g_AppCodeFont)
+                  {
+                    ImGui::PopFont();
+                  }
+                }
+                ImGui::EndTabItem();
               }
-              ImGui::InputTextMultiline("##code", data->CodeText.Buf.Data, (size_t)data->CodeText.Buf.Capacity, ImVec2(-FLT_MIN, -FLT_MIN), ImGuiInputTextFlags_ReadOnly);
-              if (g_AppCodeFont)
-              {
-                ImGui::PopFont();
-              }
+              ImGui::EndTabBar();
             }
           }
           ImGui::EndChild();
@@ -944,6 +988,7 @@ namespace ImGui
           w->HasInitialPlacement = true;
           w->InitialSize = ImVec2(em * 16.0f, em * 8.0f);
           w->InitialPos  = ImVec2(vp->WorkPos.x + vp->WorkSize.x * 0.5f, vp->WorkPos.y + em * 2.0f);
+          PushWindowControl<BaseInfoControl>(&app, w);   // hosted control -> live containment edge in the editor
         }
 
         if (st->ShowStatusBar)

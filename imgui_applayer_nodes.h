@@ -254,6 +254,8 @@ enum ImGuiAppNodeKind_
   ImGuiAppNodeKind_Window,
   ImGuiAppNodeKind_Sidebar,
   ImGuiAppNodeKind_Control,
+  ImGuiAppNodeKind_Struct,    // a standalone data struct (PersistData/TempData), wired into a control's DataIn
+  ImGuiAppNodeKind_Field,     // one field of a struct, "exploded" out for per-field wiring (drives bindings)
   ImGuiAppNodeKind_COUNT,
 };
 
@@ -391,6 +393,9 @@ struct ImGuiAppNode
   ImGuiID           LiveKey;        // stable upsert key for a live node (so its position survives re-mirroring)
   ImVector<ImGuiAppCommandDesc> Commands; // CommandLayer: definitions. Control: selected commands emitted by OnGetCommand.
   ImVector<ImGuiAppNodePort> Ports;
+  int               FieldList;       // Field node: which list it belongs to on its owner (0 = Persist, 1 = Temp)
+  int               PersistStructId; // Control: Struct node its PersistData was exploded into (-1 = inline)
+  int               TempStructId;    // Control: Struct node its TempData was exploded into (-1 = inline)
 
   ImGuiAppNode()
   {
@@ -398,7 +403,7 @@ struct ImGuiAppNode
     LayerType = ImGuiAppLayerType_Task; HasInitialPlacement = false; InitialPos = ImVec2(0.0f, 0.0f);
     InitialSize = ImVec2(0.0f, 0.0f); DockDir = ImGuiDir_Down; DockSize = 0.0f; Flags = ImGuiWindowFlags_None;
     GridPos = ImVec2(0.0f, 0.0f); HasGridPos = false; _NeedsPlace = false; BodyAttrId = 0;
-    IsLive = false; IsPromoted = false; LiveKey = 0;
+    IsLive = false; IsPromoted = false; LiveKey = 0; FieldList = 0; PersistStructId = -1; TempStructId = -1;
   }
 };
 
@@ -466,6 +471,10 @@ namespace ImGui
   // window-level selection (caller-owned, -1 = none): the editor reconciles it both ways (canvas<->tree) and
   // clears dangling ids. show_live hides (never deletes) read-only live-mirror nodes when false.
   IMGUI_API void                ShowAppGraphEditor(ImGuiApp* app, ImGuiAppGraph* g, int* selected_node_id, bool show_live);
+
+  // Roomy inspector for one node's authored data (name, Persist/Temp fields, window/sidebar props). Live nodes
+  // are read-only. node_id < 0 -> a "select a node" hint. Edits mutate the graph in place.
+  IMGUI_API void                EditAppNodeInspector(ImGuiAppGraph* g, int node_id);
 
   // Origin breadcrumb for a selected node: "sel: MainWindow > Mixer [design]" / "[live]" / "[promoted]" /
   // "sel: -" when id < 0 or unknown. char[] out, no references; encapsulates the containment-parent walk.
