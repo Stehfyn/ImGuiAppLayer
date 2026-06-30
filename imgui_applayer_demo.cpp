@@ -8,6 +8,7 @@
 #include "imgui_applayer_nodes.h"
 #include "imgui_internal.h"
 #include "imnodes.h"
+#include "IconsFontAwesome6.h"
 
 #include <ctime>
 #include <cstdlib>
@@ -462,7 +463,7 @@ namespace
       bool              show_live = doc->ShowLive;
       if (ImGui::BeginChild("##Toolbar", ImVec2(0.0f, 0.0f), ImGuiChildFlags_FrameStyle | ImGuiChildFlags_AutoResizeY))
       {
-        if (ImGui::Button("+ Add node"))
+        if (ImGui::Button(ICON_FA_CIRCLE_NODES "  Add node"))
         {
           ImGui::OpenPopup("##addnode");
         }
@@ -477,16 +478,16 @@ namespace
 
         EditorToolSep(em);
         ImGui::BeginDisabled(!ImGui::AppGraphCanUndo(&doc->Graph));
-        temp_data->Undo = ImGui::Button("Undo");
+        temp_data->Undo = ImGui::Button(ICON_FA_ARROW_ROTATE_LEFT "##undo");
         ImGui::EndDisabled();
         ImGui::SetItemTooltip("Undo (Ctrl+Z)");
         ImGui::SameLine();
         ImGui::BeginDisabled(!ImGui::AppGraphCanRedo(&doc->Graph));
-        temp_data->Redo = ImGui::Button("Redo");
+        temp_data->Redo = ImGui::Button(ICON_FA_ARROW_ROTATE_RIGHT "##redo");
         ImGui::EndDisabled();
         ImGui::SetItemTooltip("Redo (Ctrl+Y)");
         ImGui::SameLine();
-        temp_data->Tidy = ImGui::Button("Tidy");
+        temp_data->Tidy = ImGui::Button(ICON_FA_WAND_MAGIC_SPARKLES "  Tidy");
         ImGui::SetItemTooltip("Auto-layout the graph as a containment tree (L)");
 
         // Time-travel scrubber: drag across the undo history to replay graph states live.
@@ -507,24 +508,24 @@ namespace
         }
 
         EditorToolSep(em);
-        temp_data->Save = ImGui::Button("Save");
+        temp_data->Save = ImGui::Button(ICON_FA_FLOPPY_DISK "  Save");
         ImGui::SetItemTooltip("Save graph -> %s", doc->GraphPath);
         ImGui::SameLine();
-        temp_data->Load = ImGui::Button("Load");
+        temp_data->Load = ImGui::Button(ICON_FA_FOLDER_OPEN "  Load");
         ImGui::SetItemTooltip("Load graph <- %s", doc->GraphPath);
 
         EditorToolSep(em);
-        temp_data->WriteHeader = ImGui::Button("Write .h");
+        temp_data->WriteHeader = ImGui::Button(ICON_FA_FILE_EXPORT "  Write .h");
         ImGui::SetItemTooltip("Write whole-graph C++ -> %s", doc->HeaderPath);
         ImGui::SameLine();
-        temp_data->Diff = ImGui::Button("Diff");
+        temp_data->Diff = ImGui::Button(ICON_FA_CODE_COMPARE "  Diff");
         ImGui::SetItemTooltip("Diff generated C++ vs the saved graph -> clipboard");
         ImGui::SameLine();
         if (code_open)
         {
           ImGui::PushStyleColor(ImGuiCol_Button, style.Colors[ImGuiCol_ButtonActive]);
         }
-        temp_data->ToggleCode = ImGui::Button(code_open ? "Code v" : "Code >");
+        temp_data->ToggleCode = ImGui::Button(code_open ? ICON_FA_CODE "  Code " ICON_FA_ANGLE_DOWN : ICON_FA_CODE "  Code " ICON_FA_ANGLE_RIGHT);
         if (code_open)
         {
           ImGui::PopStyleColor();
@@ -1045,6 +1046,32 @@ namespace ImGui
         // rubber-bands. Panning stays on the middle mouse (imnodes' default AltMouseButton), leaving right-click
         // free for the canvas context menu.
         ImNodes::GetIO().MultipleSelectModifier.Modifier = &ImGui::GetIO().KeyCtrl;
+
+        // Blender-flat node-editor theme: rounded nodes, soft outlines, roomy padding, a dark recessed canvas
+        // with low-contrast grid, and thicker curvier links. Tuned to match the Bl-palette node bodies.
+        ImNodesStyle& ns = ImNodes::GetStyle();
+        ns.NodeCornerRounding   = 5.0f;
+        ns.NodePadding          = ImVec2(9.0f, 7.0f);
+        ns.NodeBorderThickness  = 1.0f;
+        ns.LinkThickness        = 2.6f;
+        ns.LinkLineSegmentsPerLength = 0.15f;
+        ns.PinCircleRadius      = 4.2f;
+        ns.PinHoverRadius       = 10.0f;
+        ns.GridSpacing          = 26.0f;
+        ImU32* c = ns.Colors;
+        c[ImNodesCol_NodeBackground]         = IM_COL32(48, 48, 50, 255);
+        c[ImNodesCol_NodeBackgroundHovered]  = IM_COL32(56, 56, 58, 255);
+        c[ImNodesCol_NodeBackgroundSelected] = IM_COL32(60, 60, 62, 255);
+        c[ImNodesCol_NodeOutline]            = IM_COL32(28, 28, 30, 255);
+        c[ImNodesCol_TitleBarSelected]       = IM_COL32(220, 170, 90, 255);
+        c[ImNodesCol_GridBackground]         = IM_COL32(30, 30, 32, 255);
+        c[ImNodesCol_GridLine]               = IM_COL32(42, 42, 45, 255);
+        c[ImNodesCol_GridLinePrimary]        = IM_COL32(52, 52, 56, 255);
+        c[ImNodesCol_Link]                   = IM_COL32(170, 170, 175, 200);
+        c[ImNodesCol_LinkHovered]            = IM_COL32(220, 180, 100, 255);
+        c[ImNodesCol_LinkSelected]           = IM_COL32(230, 190, 110, 255);
+        c[ImNodesCol_BoxSelector]            = IM_COL32(220, 170, 90, 40);
+        c[ImNodesCol_BoxSelectorOutline]     = IM_COL32(220, 170, 90, 150);
         imnodes_ready = true;
       }
 

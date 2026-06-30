@@ -5,6 +5,7 @@
 #define IMGUI_DEFINE_MATH_OPERATORS
 #include "imgui_applayer_nodes.h"
 #include "imnodes.h"
+#include "IconsFontAwesome6.h"             // Font Awesome glyphs for layer roles (font merged by the host app)
 
 #include <stdio.h>                         // sscanf (graph text parse)
 #include <stdlib.h>                        // atoi (graph text parse)
@@ -2266,6 +2267,59 @@ namespace ImGui
     }
   }
 
+  // One identity per layer kind: an icon, a one-line orchestration role, and an accent color -- shared by the
+  // canvas node header, body, and the pipeline group box so a layer reads the same everywhere.
+  static const char* AppLayerIcon(ImGuiAppLayerType t)
+  {
+    switch (t)
+    {
+    case ImGuiAppLayerType_Task:    return ICON_FA_GEARS;
+    case ImGuiAppLayerType_Command: return ICON_FA_TERMINAL;
+    case ImGuiAppLayerType_Status:  return ICON_FA_CIRCLE_INFO;
+    case ImGuiAppLayerType_Window:  return ICON_FA_TABLE_COLUMNS;
+    default:                        return ICON_FA_LAYER_GROUP;
+    }
+  }
+
+  static const char* AppLayerRole(ImGuiAppLayerType t)
+  {
+    switch (t)
+    {
+    case ImGuiAppLayerType_Task:    return "updates app state every frame";
+    case ImGuiAppLayerType_Command: return "routes & dispatches app commands";
+    case ImGuiAppLayerType_Status:  return "owns the bottom status bar";
+    case ImGuiAppLayerType_Window:  return "hosts windows & docking layout";
+    default:                        return "orchestration layer";
+    }
+  }
+
+  static ImU32 AppLayerAccent(ImGuiAppLayerType t)
+  {
+    switch (t)
+    {
+    case ImGuiAppLayerType_Task:    return IM_COL32(110, 150, 205, 255);   // blue: logic
+    case ImGuiAppLayerType_Command: return IM_COL32(210, 150, 90, 255);    // amber: commands
+    case ImGuiAppLayerType_Status:  return IM_COL32(140, 185, 120, 255);   // green: status
+    case ImGuiAppLayerType_Window:  return IM_COL32(165, 135, 210, 255);   // violet: windows
+    default:                        return IM_COL32(165, 165, 170, 255);
+    }
+  }
+
+  // Font Awesome glyph for a node by kind (layers use their per-type icon). Used by the outliner rows.
+  static const char* AppNodeIcon(const ImGuiAppNode* n)
+  {
+    switch (n->Kind)
+    {
+    case ImGuiAppNodeKind_Layer:   return AppLayerIcon(n->LayerType);
+    case ImGuiAppNodeKind_Window:  return ICON_FA_WINDOW_MAXIMIZE;
+    case ImGuiAppNodeKind_Sidebar: return ICON_FA_TABLE_COLUMNS;
+    case ImGuiAppNodeKind_Control: return ICON_FA_SLIDERS;
+    case ImGuiAppNodeKind_Struct:  return ICON_FA_CUBE;
+    case ImGuiAppNodeKind_Field:   return ICON_FA_TAG;
+    default:                       return ICON_FA_CIRCLE_NODES;
+    }
+  }
+
   static const char* AppNodeKindName(ImGuiAppNodeKind k)
   {
     switch (k)
@@ -2306,22 +2360,44 @@ namespace ImGui
     return 0;
   }
 
-  // Push the origin title-bar tint for a node; returns the push count so the caller can pop in balance. Does NOT
-  // touch TitleBarSelected -- the selection cue must stay legible (Theme C depends on it).
+  static ImU32 AppKindColor(ImGuiAppNodeKind k);   // fwd
+
+  // Scale an RGB color's brightness, keeping alpha (Blender-style muted node headers).
+  static ImU32 AppScaleRGB(ImU32 c, float s)
+  {
+    const int r = (int)(((c >> IM_COL32_R_SHIFT) & 0xFF) * s);
+    const int g = (int)(((c >> IM_COL32_G_SHIFT) & 0xFF) * s);
+    const int b = (int)(((c >> IM_COL32_B_SHIFT) & 0xFF) * s);
+    return IM_COL32(ImMin(r, 255), ImMin(g, 255), ImMin(b, 255), 255);
+  }
+
+  // Push a node's title-bar tint. Live/promoted nodes use their origin color (state cue); every other (design)
+  // node gets a muted kind-colored header, Blender-style, so node category reads at a glance. Hover brightens.
+  // Returns the push count for a balanced pop. TitleBarSelected is left to imnodes so selection stays legible.
   static int AppNodePushOriginStyle(const ImGuiAppNode* n)
   {
-    const ImU32 c = AppGraphOriginColor(n);
-    if (c == 0) return 0;
-    ImNodes::PushColorStyle(ImNodesCol_TitleBar, c);
-    ImNodes::PushColorStyle(ImNodesCol_TitleBarHovered, c);
+    ImU32 base = AppGraphOriginColor(n);
+    if (base == 0)
+    {
+      // Layers carry a per-type accent (they orchestrate the app, so their category must read instantly); every
+      // other design node uses its kind color. Both muted to a header tone.
+      const ImU32 raw = (n->Kind == ImGuiAppNodeKind_Layer) ? AppLayerAccent(n->LayerType) : AppKindColor(n->Kind);
+      base = AppScaleRGB(raw, 0.52f);
+    }
+    ImNodes::PushColorStyle(ImNodesCol_TitleBar, base);
+    ImNodes::PushColorStyle(ImNodesCol_TitleBarHovered, AppScaleRGB(base, 1.35f));
     return 2;
   }
 
   static void AppDrawLayerGroupBox(const ImGuiAppGraph* g, bool show_live)
   {
+    // Per visible layer: screen y-span + accent, for the Unity-execution-order-style flow rail and phase bands.
+    struct LRow { float Top; float Bot; ImU32 Accent; };
+    ImVector<LRow> rows;
     bool any = false;
     ImVec2 bb_min(FLT_MAX, FLT_MAX);
     ImVec2 bb_max(-FLT_MAX, -FLT_MAX);
+    float node_left = FLT_MAX;
     for (int i = 0; i < g->Nodes.Size; i++)
     {
       const ImGuiAppNode* n = &g->Nodes.Data[i];
@@ -2331,39 +2407,95 @@ namespace ImGui
         continue;
       const ImVec2 pos = ImNodes::GetNodeScreenSpacePos(n->Id);
       const ImVec2 size = ImNodes::GetNodeDimensions(n->Id);
-      bb_min.x = ImMin(bb_min.x, pos.x);
       bb_min.y = ImMin(bb_min.y, pos.y);
       bb_max.x = ImMax(bb_max.x, pos.x + size.x);
       bb_max.y = ImMax(bb_max.y, pos.y + size.y);
+      node_left = ImMin(node_left, pos.x);
+      LRow r; r.Top = pos.y; r.Bot = pos.y + size.y; r.Accent = AppLayerAccent(n->LayerType);
+      rows.push_back(r);
       any = true;
     }
     if (!any)
       return;
 
+    // Sort rows top -> bottom (execution order).
+    for (int a = 0; a < rows.Size; a++)
+      for (int b = a + 1; b < rows.Size; b++)
+        if (rows.Data[b].Top < rows.Data[a].Top)
+        {
+          const LRow t = rows.Data[a];
+          rows.Data[a] = rows.Data[b];
+          rows.Data[b] = t;
+        }
+
     const float em = ImGui::GetFontSize();
     const float pad = em * 0.75f;
+    const float rail_w = em * 2.0f;      // left gutter housing the numbered execution-order rail
     const float title_h = ImGui::GetFrameHeight();
-    bb_min.x -= pad;
+    bb_min.x = node_left - pad - rail_w;
     bb_min.y -= title_h + pad;
     bb_max.x += pad;
     bb_max.y += pad;
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    const ImU32 fill = ImGui::GetColorU32(ImVec4(0.35f, 0.35f, 0.35f, 0.08f));
+    const ImU32 fill = ImGui::GetColorU32(ImVec4(0.32f, 0.32f, 0.34f, 0.10f));
     const ImU32 outline = ImGui::GetColorU32(ImVec4(0.70f, 0.70f, 0.70f, 0.55f));
-    const ImU32 title_bg = ImGui::GetColorU32(ImVec4(0.20f, 0.20f, 0.20f, 0.75f));
+    const ImU32 title_bg = ImGui::GetColorU32(ImVec4(0.18f, 0.18f, 0.20f, 0.85f));
     const ImU32 title_fg = ImGui::GetColorU32(ImGuiCol_Text);
     const float rounding = 4.0f;
 
     dl->AddRectFilled(bb_min, bb_max, fill, rounding);
     dl->AddRect(bb_min, bb_max, outline, rounding, 0, 1.5f);
 
-    const char* title = "ImGuiAppLayer";
+    // Phase bands: a faint accent-tinted strip behind each layer (Unity flowchart's colored lifecycle sections),
+    // spanning from the rail gutter to the box's right edge.
+    const float band_x0 = bb_min.x + rail_w + pad * 0.4f;
+    const float band_x1 = bb_max.x - pad * 0.4f;
+    for (int i = 0; i < rows.Size; i++)
+    {
+      const ImU32 band = (rows.Data[i].Accent & 0x00FFFFFF) | (IM_COL32(0, 0, 0, 26) & 0xFF000000);
+      dl->AddRectFilled(ImVec2(band_x0, rows.Data[i].Top - 2.0f), ImVec2(band_x1, rows.Data[i].Bot + 2.0f), band, 3.0f);
+    }
+
+    // Execution-order rail: a vertical flow spine through numbered circles at each layer's center, accent-filled
+    // (Unity's Script Execution Order numbering + the lifecycle flowchart's top-down arrows, combined).
+    const float rail_cx = bb_min.x + rail_w * 0.55f;
+    const float r = em * 0.62f;
+    if (rows.Size > 1)
+    {
+      const float y0 = (rows.Data[0].Top + rows.Data[0].Bot) * 0.5f;
+      const float y1 = (rows.Data[rows.Size - 1].Top + rows.Data[rows.Size - 1].Bot) * 0.5f;
+      dl->AddLine(ImVec2(rail_cx, y0), ImVec2(rail_cx, y1), ImGui::GetColorU32(ImVec4(0.6f, 0.6f, 0.64f, 0.55f)), 2.0f);
+    }
+    for (int i = 0; i < rows.Size; i++)
+    {
+      const float cy = (rows.Data[i].Top + rows.Data[i].Bot) * 0.5f;
+      // Downward arrowhead between this circle and the next (flow direction).
+      if (i + 1 < rows.Size)
+      {
+        const float ay = (rows.Data[i].Bot + rows.Data[i + 1].Top) * 0.5f;
+        const float s = em * 0.26f;
+        const ImU32 arr = ImGui::GetColorU32(ImVec4(0.6f, 0.6f, 0.64f, 0.7f));
+        dl->AddTriangleFilled(ImVec2(rail_cx - s, ay - s), ImVec2(rail_cx + s, ay - s), ImVec2(rail_cx, ay + s), arr);
+      }
+      dl->AddCircleFilled(ImVec2(rail_cx, cy), r, AppScaleRGB(rows.Data[i].Accent, 0.85f));
+      dl->AddCircle(ImVec2(rail_cx, cy), r, IM_COL32(20, 20, 22, 220), 0, 1.5f);
+      char num[8];
+      ImFormatString(num, IM_ARRAYSIZE(num), "%d", i + 1);
+      const ImVec2 ns = ImGui::CalcTextSize(num);
+      dl->AddText(ImVec2(rail_cx - ns.x * 0.5f, cy - ns.y * 0.5f), IM_COL32(20, 20, 22, 255), num);
+    }
+
+    // Header chip: icon + "App Layers" + the lifecycle hint, so the stack reads as the app's per-frame pipeline.
+    const char* title = ICON_FA_LAYER_GROUP "  App Layers";
+    const char* hint  = "execution order " ICON_FA_ANGLE_DOWN;
     const ImVec2 text_size = ImGui::CalcTextSize(title);
+    const ImVec2 hint_size = ImGui::CalcTextSize(hint);
     const ImVec2 title_min = ImVec2(bb_min.x + pad, bb_min.y);
-    const ImVec2 title_max = ImVec2(title_min.x + text_size.x + pad, bb_min.y + title_h);
+    const ImVec2 title_max = ImVec2(title_min.x + text_size.x + hint_size.x + pad * 3.0f, bb_min.y + title_h);
     dl->AddRectFilled(title_min, title_max, title_bg, 3.0f);
     dl->AddText(ImVec2(title_min.x + pad * 0.5f, title_min.y + (title_h - text_size.y) * 0.5f), title_fg, title);
+    dl->AddText(ImVec2(title_min.x + pad * 0.5f + text_size.x + pad * 1.5f, title_min.y + (title_h - hint_size.y) * 0.5f), ImGui::GetColorU32(ImGuiCol_TextDisabled), hint);
   }
 
   static bool AppHandleLayerVerticalDrag(ImGuiAppGraph* g, bool show_live, int* out_anchor_id, ImVec2* out_anchor_pos)
@@ -2777,6 +2909,7 @@ namespace ImGui
     // Snap-to-grid: toggled by the G key (latched here, applied to the imnodes style for this frame). When on,
     // imnodes snaps node origins to the grid as they're dragged.
     static bool s_snap_grid = false;
+    static bool s_help = false;       // F1 shortcut cheat-sheet overlay
     if (s_snap_grid)
       ImNodes::GetStyle().Flags |= ImNodesStyleFlags_GridSnapping;
     else
@@ -2951,19 +3084,45 @@ namespace ImGui
       }
       else if (n->Kind == ImGuiAppNodeKind_Layer)
       {
-        // A live layer's title is already its type (e.g. "ImGuiAppTaskLayer") and the origin badge is the body
-        // item, so it needs no body line. A design layer shows the type *selector* (interactive, not a dup).
+        const ImGuiAppLayerType lt = n->LayerType;
+        const float em = ImGui::GetFontSize();
+
+        // Identity row: accent icon + role, plus the layer's place in the execution pipeline (top -> bottom).
+        int order = 1;
+        int total = 0;
+        for (int li = 0; li < g->Nodes.Size; li++)
+        {
+          const ImGuiAppNode* o = &g->Nodes.Data[li];
+          if (o->Kind != ImGuiAppNodeKind_Layer || (!show_live && o->IsLive))
+            continue;
+          total++;
+          if (o->Id != n->Id && o->GridPos.y < n->GridPos.y)
+            order++;
+        }
+        ImGui::PushStyleColor(ImGuiCol_Text, AppLayerAccent(lt));
+        ImGui::Text(ICON_FA_LAYER_GROUP " %d/%d", order, total);   // pipeline order badge, accent-colored
+        ImGui::PopStyleColor();
+        ImGui::SameLine(0.0f, em * 0.5f);
+        ImGui::PushStyleColor(ImGuiCol_Text, AppLayerAccent(lt));
+        ImGui::TextUnformatted(AppLayerIcon(lt));
+        ImGui::PopStyleColor();
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", AppLayerRole(lt));
+
+        // A design layer can switch its type (one per kind); live layers are read-only.
         if (!n->IsLive)
         {
-          ImGui::SetNextItemWidth(ImGui::GetFontSize() * 11.0f);
-          if (ImGui::BeginCombo("##layertype", AppLayerTypeName(n->LayerType)))
+          ImGui::SetNextItemWidth(em * 11.0f);
+          if (ImGui::BeginCombo("##layertype", AppLayerTypeName(lt)))
           {
             for (int t = 0; t < ImGuiAppLayerType_COUNT; t++)
             {
-              const bool is_current = n->LayerType == t;
+              const bool is_current = lt == t;
               const bool taken = !is_current && AppGraphFindLayerOfType(g, (ImGuiAppLayerType)t, n->Id) != nullptr;
               if (taken) ImGui::BeginDisabled();
-              if (ImGui::Selectable(AppLayerTypeName((ImGuiAppLayerType)t), is_current) && !taken)
+              char item[80];
+              ImFormatString(item, IM_ARRAYSIZE(item), "%s  %s", AppLayerIcon((ImGuiAppLayerType)t), AppLayerTypeName((ImGuiAppLayerType)t));
+              if (ImGui::Selectable(item, is_current) && !taken)
               {
                 n->LayerType = (ImGuiAppLayerType)t;
                 AppGraphPlaceNode(g, n, nullptr);
@@ -2973,7 +3132,7 @@ namespace ImGui
             ImGui::EndCombo();
           }
         }
-        if (n->LayerType == ImGuiAppLayerType_Command && !n->IsLive)
+        if (lt == ImGuiAppLayerType_Command && !n->IsLive)
           EditAppNodeCommands(n);   // a live command layer is read-only; don't render its editor (also keeps it short)
         ImGui::Dummy(ImVec2(kAppGraphLayerNodeWidth, 1.0f));
       }
@@ -3066,160 +3225,7 @@ namespace ImGui
     ImNodes::MiniMap(0.2f, ImNodesMiniMapLocation_BottomRight);
     ImNodes::EndNodeEditor();
     const ImVec2 editor_size = ImGui::GetItemRectSize();   // captured before later items, for fit-all centering
-    const ImVec2 editor_min  = ImGui::GetItemRectMin();    // editor canvas rect (screen), for overlay extents
-    const ImVec2 editor_max  = ImGui::GetItemRectMax();
-
-    // Alignment guides: while dragging a single node, draw Blender-style guide lines wherever one of its edges
-    // (or center) lines up with another visible node's edge/center, within a few pixels. Pure visual aid.
-    if (ImNodes::NumSelectedNodes() == 1 && ImGui::IsMouseDragging(ImGuiMouseButton_Left))
-    {
-      int picked = -1;
-      ImNodes::GetSelectedNodes(&picked);
-      const ImGuiAppNode* pn = picked >= 0 ? AppGraphFindNodeConst(g, picked) : nullptr;
-      if (pn != nullptr && !(!show_live && pn->IsLive) && !AppNodeHiddenByCollapse(g, picked))
-      {
-        const ImVec2 pp = ImNodes::GetNodeScreenSpacePos(picked);
-        const ImVec2 pd = ImNodes::GetNodeDimensions(picked);
-        const float px[3] = { pp.x, pp.x + pd.x * 0.5f, pp.x + pd.x };
-        const float py[3] = { pp.y, pp.y + pd.y * 0.5f, pp.y + pd.y };
-        const float tol = 5.0f;
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        const ImU32 guide = IM_COL32(255, 120, 200, 180);
-        for (int i = 0; i < g->Nodes.Size; i++)
-        {
-          const ImGuiAppNode* on = &g->Nodes.Data[i];
-          if (on->Id == picked || (!show_live && on->IsLive) || AppNodeHiddenByCollapse(g, on->Id))
-            continue;
-          const ImVec2 op = ImNodes::GetNodeScreenSpacePos(on->Id);
-          const ImVec2 od = ImNodes::GetNodeDimensions(on->Id);
-          const float ox[3] = { op.x, op.x + od.x * 0.5f, op.x + od.x };
-          const float oy[3] = { op.y, op.y + od.y * 0.5f, op.y + od.y };
-          for (int a = 0; a < 3; a++)
-            for (int b = 0; b < 3; b++)
-            {
-              if (ImAbs(px[a] - ox[b]) <= tol)
-                dl->AddLine(ImVec2(ox[b], editor_min.y), ImVec2(ox[b], editor_max.y), guide, 1.0f);
-              if (ImAbs(py[a] - oy[b]) <= tol)
-                dl->AddLine(ImVec2(editor_min.x, oy[b]), ImVec2(editor_max.x, oy[b]), guide, 1.0f);
-            }
-        }
-      }
-    }
-
-    // Quick-connect by proximity: while dragging a single node near a compatible one, preview a ghost wire
-    // between their centers; on release, auto-wire their primary complementary ports (validated like any link).
-    // imnodes exposes no pin coordinates, so this works at node granularity (centers), not exact pins.
-    {
-      static int s_qc_src = -1;     // chosen src port, latched during the drag for the release frame
-      static int s_qc_dst = -1;
-
-      auto ports_linked = [&](int pa, int pb) -> bool
-      {
-        for (int i = 0; i < g->Links.Size; i++)
-          if ((g->Links.Data[i].StartAttr == pa && g->Links.Data[i].EndAttr == pb) ||
-              (g->Links.Data[i].StartAttr == pb && g->Links.Data[i].EndAttr == pa))
-            return true;
-        return false;
-      };
-      // Pick a legal (src,dst) port pair between two nodes, or (-1,-1). Tries the natural data/containment
-      // directions both ways and lets AppGraphCanLink arbitrate.
-      auto qc_pair = [&](int a, int b, int* src, int* dst) -> bool
-      {
-        const ImGuiAppNode* na = AppGraphFindNodeConst(g, a);
-        const ImGuiAppNode* nb = AppGraphFindNodeConst(g, b);
-        if (na == nullptr || nb == nullptr)
-          return false;
-        const ImGuiAppPortKind outs[2] = { ImGuiAppPortKind_DataOut, ImGuiAppPortKind_ChildOut };
-        const ImGuiAppPortKind ins[2]  = { ImGuiAppPortKind_DataIn,  ImGuiAppPortKind_ChildIn };
-        for (int dir = 0; dir < 2; dir++)
-        {
-          const ImGuiAppNode* from = dir == 0 ? na : nb;
-          const ImGuiAppNode* to   = dir == 0 ? nb : na;
-          for (int k = 0; k < 2; k++)
-          {
-            const int sp = AppNodeFirstPortKind(from, outs[k]);
-            const int dp = AppNodeFirstPortKind(to, ins[k]);
-            if (sp <= 0 || dp <= 0 || ports_linked(sp, dp))
-              continue;
-            char err[8];
-            if (AppGraphCanLink(g, sp, dp, err, IM_ARRAYSIZE(err)))
-            {
-              *src = sp;
-              *dst = dp;
-              return true;
-            }
-          }
-        }
-        return false;
-      };
-
-      bool have_candidate = false;
-      if (ImNodes::NumSelectedNodes() == 1 && ImGui::IsMouseDragging(ImGuiMouseButton_Left))
-      {
-        int picked = -1;
-        ImNodes::GetSelectedNodes(&picked);
-        const ImGuiAppNode* pn = picked >= 0 ? AppGraphFindNodeConst(g, picked) : nullptr;
-        if (pn != nullptr && !(!show_live && pn->IsLive) && !AppNodeHiddenByCollapse(g, picked))
-        {
-          const ImVec2 pp = ImNodes::GetNodeScreenSpacePos(picked);
-          const ImVec2 pd = ImNodes::GetNodeDimensions(picked);
-          const ImVec2 pc(pp.x + pd.x * 0.5f, pp.y + pd.y * 0.5f);
-          float best = 280.0f;   // max center distance to consider
-          int   best_node = -1;
-          int   best_src = -1;
-          int   best_dst = -1;
-          for (int i = 0; i < g->Nodes.Size; i++)
-          {
-            const ImGuiAppNode* on = &g->Nodes.Data[i];
-            if (on->Id == picked || (!show_live && on->IsLive) || AppNodeHiddenByCollapse(g, on->Id) || on->Kind == ImGuiAppNodeKind_Layer)
-              continue;
-            const ImVec2 op = ImNodes::GetNodeScreenSpacePos(on->Id);
-            const ImVec2 od = ImNodes::GetNodeDimensions(on->Id);
-            const ImVec2 oc(op.x + od.x * 0.5f, op.y + od.y * 0.5f);
-            const float dist = ImSqrt((oc.x - pc.x) * (oc.x - pc.x) + (oc.y - pc.y) * (oc.y - pc.y));
-            if (dist >= best)
-              continue;
-            int sp = -1, dp = -1;
-            if (qc_pair(picked, on->Id, &sp, &dp))
-            {
-              best = dist;
-              best_node = on->Id;
-              best_src = sp;
-              best_dst = dp;
-            }
-          }
-          if (best_node >= 0)
-          {
-            const ImVec2 op = ImNodes::GetNodeScreenSpacePos(best_node);
-            const ImVec2 od = ImNodes::GetNodeDimensions(best_node);
-            const ImVec2 oc(op.x + od.x * 0.5f, op.y + od.y * 0.5f);
-            ImGui::GetWindowDrawList()->AddLine(pc, oc, IM_COL32(120, 220, 140, 220), 2.5f);
-            ImGui::GetWindowDrawList()->AddCircleFilled(oc, 5.0f, IM_COL32(120, 220, 140, 220));
-            s_qc_src = best_src;
-            s_qc_dst = best_dst;
-            have_candidate = true;
-          }
-        }
-      }
-      if (ImGui::IsMouseDragging(ImGuiMouseButton_Left))
-      {
-        if (!have_candidate)   // dragged away from any partner -> drop the stale latch
-        {
-          s_qc_src = -1;
-          s_qc_dst = -1;
-        }
-      }
-      else
-      {
-        if (ImGui::IsMouseReleased(ImGuiMouseButton_Left) && s_qc_src > 0 && s_qc_dst > 0)
-        {
-          AppGraphTryConnect(g, s_qc_src, s_qc_dst);
-          AppInferStructFieldType(g, s_qc_src, s_qc_dst);
-        }
-        s_qc_src = -1;
-        s_qc_dst = -1;
-      }
-    }
+    const ImVec2 editor_min  = ImGui::GetItemRectMin();    // editor canvas top-left (screen), for overlay extents
 
     // Semantic group frames: a translucent labeled box around each containment group, layered by depth so inner
     // groups sit atop outer ones -- windows/sidebars (+ hosted controls) behind, control data clusters, then
@@ -3588,6 +3594,10 @@ namespace ImGui
       }
       if (ImGui::IsKeyPressed(ImGuiKey_G, false))
         s_snap_grid = !s_snap_grid;   // toggle snap-to-grid
+      if (ImGui::IsKeyPressed(ImGuiKey_F1, false))
+        s_help = !s_help;             // toggle shortcut cheat-sheet
+      if (ImGui::IsKeyPressed(ImGuiKey_Space, false))
+        ImGui::OpenPopup("##cmdpalette");   // Blender-style operator search
 
       // Nudge: arrow keys move the selected nodes by 1 grid unit (Shift = 10). Held = repeat.
       {
@@ -3839,6 +3849,148 @@ namespace ImGui
       if (added != nullptr)
         AppGraphPlaceNode(g, added, &add_popup_grid);
       ImGui::EndPopup();
+    }
+
+    // Command palette (Space): a searchable list of canvas operators, Blender-style. Runs the operator directly.
+    if (ImGui::BeginPopup("##cmdpalette"))
+    {
+      static ImGuiTextFilter pf;
+      if (ImGui::IsWindowAppearing())
+      {
+        pf.Clear();
+        ImGui::SetKeyboardFocusHere();
+      }
+      ImGui::SetNextItemWidth(ImGui::GetFontSize() * 16.0f);
+      pf.Draw("##cmdsearch");
+      ImGui::Separator();
+
+      struct Cmd { const char* Label; int Id; };
+      static const Cmd cmds[] =
+      {
+        { "Add: Control", 0 }, { "Add: Struct", 1 }, { "Add: Window", 2 }, { "Add: Sidebar", 3 },
+        { "Add: Task Layer", 4 }, { "Add: Command Layer", 5 }, { "Add: Status Layer", 6 }, { "Add: Window Layer", 7 },
+        { "Layout: Tidy", 10 }, { "View: Fit all", 11 }, { "View: Fit selection", 12 }, { "Toggle: Snap to grid", 13 },
+        { "Edit: Undo", 14 }, { "Edit: Redo", 15 }, { "Edit: Copy", 16 }, { "Edit: Paste", 17 },
+        { "Edit: Duplicate", 18 }, { "Edit: Delete selection", 19 },
+        { "Groups: Collapse all", 20 }, { "Groups: Expand all", 21 }, { "Import: Paste C++ struct(s)", 22 },
+      };
+      int run = -1;
+      for (int i = 0; i < IM_ARRAYSIZE(cmds); i++)
+        if (pf.PassFilter(cmds[i].Label) && ImGui::Selectable(cmds[i].Label))
+          run = cmds[i].Id;
+
+      if (run >= 0)
+      {
+        ImGuiAppNode* added = nullptr;
+        switch (run)
+        {
+        case 0: added = AppGraphAddNode(g, ImGuiAppNodeKind_Control, "NewControl"); break;
+        case 1: added = AppGraphAddNode(g, ImGuiAppNodeKind_Struct,  "NewStruct");  break;
+        case 2: added = AppGraphAddNode(g, ImGuiAppNodeKind_Window,  "Window");     break;
+        case 3: added = AppGraphAddNode(g, ImGuiAppNodeKind_Sidebar, "Sidebar");    break;
+        case 4: case 5: case 6: case 7:
+        {
+          const ImGuiAppLayerType lt = run == 4 ? ImGuiAppLayerType_Task : run == 5 ? ImGuiAppLayerType_Command : run == 6 ? ImGuiAppLayerType_Status : ImGuiAppLayerType_Window;
+          if (!AppGraphHasLayerType(g, lt))
+          {
+            added = AppGraphAddNode(g, ImGuiAppNodeKind_Layer, AppLayerNodeName(lt));
+            added->LayerType = lt;
+          }
+          break;
+        }
+        case 10: AppGraphAutoLayout(g, show_live); fit_all(); break;
+        case 11: fit_all(); break;
+        case 12: fit_ids(g->Selection); break;
+        case 13: s_snap_grid = !s_snap_grid; break;
+        case 14: if (AppGraphCanUndo(g)) { AppGraphUndo(g); ImNodes::ClearNodeSelection(); } break;
+        case 15: if (AppGraphCanRedo(g)) { AppGraphRedo(g); ImNodes::ClearNodeSelection(); } break;
+        case 16: AppGraphCopySelection(g, g->Selection); break;
+        case 17: AppGraphPasteClipboard(g); break;
+        case 18:
+        {
+          ImVector<int> sel = g->Selection;
+          for (int i = 0; i < sel.Size; i++)
+            if (const ImGuiAppNode* sn = AppGraphFindNode(g, sel.Data[i]))
+              AppGraphDuplicateNode(g, sn);
+          break;
+        }
+        case 19:
+        {
+          ImVector<int> sel = g->Selection;
+          for (int i = 0; i < sel.Size; i++)
+          {
+            const ImGuiAppNode* sn = AppGraphFindNode(g, sel.Data[i]);
+            if (sn != nullptr && !sn->IsLive)
+              AppGraphRemoveNode(g, sel.Data[i]);
+          }
+          break;
+        }
+        case 20:
+          for (int i = 0; i < g->Nodes.Size; i++)
+          {
+            ImGuiAppNode* n = &g->Nodes.Data[i];
+            const bool owner = (n->Kind == ImGuiAppNodeKind_Window || n->Kind == ImGuiAppNodeKind_Sidebar) ? AppGraphHostsControl(g, n->Id)
+                             : n->Kind == ImGuiAppNodeKind_Control ? (n->PersistStructId >= 0 || n->TempStructId >= 0)
+                             : n->Kind == ImGuiAppNodeKind_Struct ? (AppGraphFieldNodeCount(g, n->Id, 0) > 0) : false;
+            if (owner)
+              n->GroupCollapsed = true;
+          }
+          break;
+        case 21:
+          for (int i = 0; i < g->Nodes.Size; i++)
+          {
+            g->Nodes.Data[i].GroupCollapsed = false;
+            g->Nodes.Data[i]._NeedsPlace = true;
+          }
+          break;
+        case 22:
+          if (const char* clip = ImGui::GetClipboardText())
+            AppGraphImportStructsFromCode(g, clip, add_popup_grid);
+          break;
+        default: break;
+        }
+        if (added != nullptr)
+          AppGraphPlaceNode(g, added, nullptr);
+        ImGui::CloseCurrentPopup();
+      }
+      ImGui::EndPopup();
+    }
+
+    // Shortcut cheat-sheet (F1): a translucent reference card in the canvas corner.
+    if (s_help)
+    {
+      static const char* lines[] =
+      {
+        "Space   command palette",
+        "F        frame selection      Home  fit all",
+        "L        tidy layout          G     snap-to-grid",
+        "[ / ]   send back / front     arrows nudge (Shift x10)",
+        "Del      delete                F2*   rename (in tree)",
+        "Ctrl+Z / Ctrl+Y   undo / redo",
+        "Ctrl+C / Ctrl+V   copy / paste subtree",
+        "drag pin -> empty   new node       drag link end   rewire",
+        "wheel over field    scrub value",
+        "click group chip     collapse      drag chip           move group",
+        "right-click          context menu  middle-drag         pan",
+        "F1       toggle this help",
+      };
+      const float em = ImGui::GetFontSize();
+      ImVec2 mn(editor_min.x + em * 0.8f, editor_min.y + em * 0.8f);
+      float w = 0.0f;
+      for (int i = 0; i < IM_ARRAYSIZE(lines); i++)
+        w = ImMax(w, ImGui::CalcTextSize(lines[i]).x);
+      const ImVec2 mx(mn.x + w + em * 1.4f, mn.y + (float)IM_ARRAYSIZE(lines) * ImGui::GetTextLineHeightWithSpacing() + em * 1.4f);
+      ImDrawList* dl = ImGui::GetWindowDrawList();
+      dl->AddRectFilled(mn, mx, IM_COL32(24, 24, 26, 235), 6.0f);
+      dl->AddRect(mn, mx, IM_COL32(220, 170, 90, 200), 6.0f, 0, 1.5f);
+      ImVec2 tp(mn.x + em * 0.7f, mn.y + em * 0.7f);
+      dl->AddText(tp, IM_COL32(220, 170, 90, 255), "Shortcuts");
+      tp.y += ImGui::GetTextLineHeightWithSpacing();
+      for (int i = 0; i < IM_ARRAYSIZE(lines); i++)
+      {
+        dl->AddText(tp, IM_COL32(220, 220, 222, 255), lines[i]);
+        tp.y += ImGui::GetTextLineHeightWithSpacing();
+      }
     }
 
     char err[128];
@@ -6234,9 +6386,10 @@ namespace ImGui
       f |= ImGuiTreeNodeFlags_Selected;
 
     const ImU32 tint = AppGraphOriginColor(n);
-    ImGui::PushStyleColor(ImGuiCol_Text, tint ? tint : AppKindColor(n->Kind));
+    const ImU32 row_col = tint ? tint : (n->Kind == ImGuiAppNodeKind_Layer ? AppLayerAccent(n->LayerType) : AppKindColor(n->Kind));
+    ImGui::PushStyleColor(ImGuiCol_Text, row_col);
     const char* tag = n->IsLive ? " [live]" : n->IsPromoted ? " [promoted]" : "";
-    const bool open = ImGui::TreeNodeEx("##row", f, "%s%s", n->Draft.Name[0] ? n->Draft.Name : "(unnamed)", tag);
+    const bool open = ImGui::TreeNodeEx("##row", f, "%s  %s%s", AppNodeIcon(n), n->Draft.Name[0] ? n->Draft.Name : "(unnamed)", tag);
     ImGui::PopStyleColor();
 
     if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen())
