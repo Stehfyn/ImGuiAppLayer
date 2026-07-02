@@ -3737,7 +3737,11 @@ namespace ImGui
     if (at_root && s_editor_ran_once)
       AppDrawLayerGroupBox(g, show_live);
 
-    s_editor_pool_ids.resize(0);   // rebuilt every frame: exactly the ids this submission puts in the pool
+    // Last frame's pool ids, kept for the re-entry check below; the current list is rebuilt from scratch
+    // every frame: exactly the ids this submission puts in the pool.
+    static ImVector<int> s_editor_prev_pool_ids;
+    s_editor_prev_pool_ids.swap(s_editor_pool_ids);
+    s_editor_pool_ids.resize(0);
     for (int i = 0; i < g->Nodes.Size; i++)
     {
       ImGuiAppNode* n = &g->Nodes.Data[i];
@@ -3750,6 +3754,13 @@ namespace ImGui
       if (AppNodeHiddenByCollapse(g, n->Id))
         continue;
       s_editor_pool_ids.push_back(n->Id);
+
+      // Rejoining the canvas after a frame of eviction (unhidden via the outliner eye / show-all / H, a group
+      // expand, or any other path with no explicit re-arm): imnodes recreated the pool entry at the default
+      // origin, and the post-submit read-back would overwrite the stored GridPos with that origin -- the saved
+      // position would be destroyed, not just ignored. Re-seat the node at its stored position instead.
+      if (n->HasGridPos && !n->_NeedsPlace && !AppIdInSet(s_editor_prev_pool_ids, n->Id))
+        n->_NeedsPlace = true;
 
       if (n->Kind == ImGuiAppNodeKind_Layer)
         ImNodes::SetNodeDraggable(n->Id, false);
