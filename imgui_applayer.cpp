@@ -5,6 +5,103 @@
 
 #include <ctime>
 #include <cstdio>
+#include <cstdlib>                        // exit (assert sink)
+#include <cstring>                        // memcpy (state snapshots)
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>                      // CaptureStackBackTrace, IsDebuggerPresent
+#include <dbghelp.h>                      // SymInitialize, SymFromAddr, SymGetLineFromAddr64
+#pragma comment(lib, "dbghelp.lib")
+#endif
+
+//-----------------------------------------------------------------------------
+// Assert forensics: symbolized backtrace + WAL sink. See imguix_imconfig.h for the IM_ASSERT routing.
+//-----------------------------------------------------------------------------
+
+static ImGuiAppWAL* g_app_assert_wal = nullptr;
+
+namespace ImGui
+{
+  IMGUI_API void SetAppAssertWAL(ImGuiAppWAL* wal)
+  {
+      g_app_assert_wal = wal;
+  }
+}
+
+IMGUI_API int ImStackTrace(char* out, int out_size, int skip_frames)
+{
+    if (out == nullptr || out_size <= 0)
+      return 0;
+    out[0] = 0;
+#ifdef _WIN32
+    HANDLE proc = GetCurrentProcess();
+    static bool sym_ready = false;
+    if (!sym_ready)
+    {
+      SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_LOAD_LINES);
+      SymInitialize(proc, nullptr, TRUE);
+      sym_ready = true;
+    }
+
+    void* frames[62];
+    const int n = (int)CaptureStackBackTrace((DWORD)(skip_frames + 1), 62, frames, nullptr);
+
+    char sym_buf[sizeof(SYMBOL_INFO) + 256];
+    SYMBOL_INFO* sym = (SYMBOL_INFO*)sym_buf;
+    sym->SizeOfStruct = sizeof(SYMBOL_INFO);
+    sym->MaxNameLen = 255;
+
+    int len = 0;
+    for (int i = 0; i < n && len < out_size - 1; i++)
+    {
+      const DWORD64 addr = (DWORD64)frames[i];
+      const char* name = "??";
+      if (SymFromAddr(proc, addr, nullptr, sym))
+        name = sym->Name;
+
+      IMAGEHLP_LINE64 line;
+      line.SizeOfStruct = sizeof(line);
+      DWORD col = 0;
+      if (SymGetLineFromAddr64(proc, addr, &col, &line))
+        len += ImFormatString(out + len, (size_t)(out_size - len), "  #%-2d %s (%s:%d)\n", i, name, line.FileName, (int)line.LineNumber);
+      else
+        len += ImFormatString(out + len, (size_t)(out_size - len), "  #%-2d %s\n", i, name);
+    }
+    return len;
+#else
+    IM_UNUSED(skip_frames);
+    return 0;
+#endif
+}
+
+IMGUI_API void ImGuiAppAssertFail(const char* expr, const char* file, int line)
+{
+    // Re-entrancy guard: an assert inside the logging path must not recurse -- die plainly instead.
+    static bool in_assert = false;
+    if (in_assert)
+      exit(3);
+    in_assert = true;
+
+    char stack[3072];
+    ImStackTrace(stack, IM_ARRAYSIZE(stack), 1);
+
+    ImGui::AppWALWrite(g_app_assert_wal, ImGuiAppWALLevel_Lifecycle, "ASSERT FAILED: (%s) at %s:%d\n%s", expr, file, line, stack);
+    fprintf(stderr, "ASSERT FAILED: (%s) at %s:%d\n%s", expr, file, line, stack);
+    fflush(stderr);
+
+#ifdef _WIN32
+    if (IsDebuggerPresent())
+    {
+      __debugbreak();
+      in_assert = false;   // debugger may continue past the break; let later asserts report too
+      return;
+    }
+#endif
+    exit(3);   // deterministic, popup-free
+}
 
 ImGuiApp::~ImGuiApp()
 {
@@ -119,8 +216,15 @@ void ImGuiAppTaskLayer::OnDetach(ImGuiApp* app) const
 
 void ImGuiAppTaskLayer::OnUpdate(ImGuiApp* app, float dt) const
 {
-    IM_UNUSED(app);
-    IM_UNUSED(dt);
+    // Controls are the app's per-frame state machines: OnUpdate consumes the TempData that OnRender recorded
+    // last frame (against last_temp_data -- the event-identification idiom) and mutates PersistData. They run
+    // in the TASK layer, before the Command layer collects OnGetCommand, so state updated this frame can emit
+    // a command this same frame; the Window layer stays purely presentational.
+    ImGui::ForEachAppControl(app, [app, dt](ImGuiAppControlBase* control, ImGuiAppWindowBase* host)
+    {
+        IM_UNUSED(host);
+        control->OnUpdate(app, dt);
+    });
 }
 
 void ImGuiAppTaskLayer::OnRender(const ImGuiApp* app) const
@@ -142,21 +246,29 @@ void ImGuiAppCommandLayer::OnUpdate(ImGuiApp* app, float dt) const
 {
     IM_UNUSED(dt);
 
-    ImGuiAppCommand cmd;
-    ImBitArray<ImGuiAppCommand_COUNT> arr;
-    arr.ClearAllBits();
-
-    //for (auto& control : app->Controls)
-    //{
-    //    cmd = ImGuiAppCommand_None;
-    //    control->OnGetCommand(app, &cmd);
-    //    arr.SetBit(static_cast<int>(cmd));
-    //}
-
-    for (cmd = ImGuiAppCommand_None; cmd < ImGuiAppCommand_COUNT; cmd = static_cast<ImGuiAppCommand>(1 + cmd))
+    // Collect at most one command per control this frame -- app-level and hosted alike -- then dispatch each
+    // DISTINCT command once, in first-emission order. Dedup is set-semantics over an open command space (apps
+    // extend the enum past ImGuiAppCommand_COUNT, so a COUNT-sized bit array cannot represent user commands).
+    // Runs after the Task layer's control updates (layer push order), so a command decided in OnUpdate is
+    // collected and executed the same frame.
+    ImVector<ImGuiAppCommand> cmds;
+    ImGui::ForEachAppControl(app, [app, &cmds](ImGuiAppControlBase* control, ImGuiAppWindowBase* host)
     {
-        if (arr.TestBit(cmd))
-            app->OnExecuteCommand(cmd);
+        IM_UNUSED(host);
+        ImGuiAppCommand cmd = ImGuiAppCommand_None;
+        control->OnGetCommand(app, &cmd);
+        if (cmd == ImGuiAppCommand_None)
+            return;
+        for (int i = 0; i < cmds.Size; i++)
+            if (cmds.Data[i] == cmd)
+                return;
+        cmds.push_back(cmd);
+    });
+
+    for (int i = 0; i < cmds.Size; i++)
+    {
+        ImGui::AppWALWrite(app->WAL, ImGuiAppWALLevel_Lifecycle, "execute command %d", (int)cmds.Data[i]);
+        app->OnExecuteCommand(cmds.Data[i]);
     }
 }
 
@@ -271,25 +383,13 @@ void ImGuiAppWindowLayer::OnDetach(ImGuiApp* app) const
 
 void ImGuiAppWindowLayer::OnUpdate(ImGuiApp* app, float dt) const
 {
-    // App-level controls (not attached to a window/sidebar) render their own windows.
-    for (auto& control : app->Controls)
-      control->OnUpdate(app, dt);
-
+    // Window/sidebar OBJECTS update here; their hosted controls updated in the Task layer (with all controls),
+    // so hosts always see this frame's control state.
     for (auto& sidebar : app->Sidebars)
-    {
-      for (auto& control : sidebar->Controls)
-        control->OnUpdate(app, dt);
-
       sidebar->OnUpdate(app, dt);
-    }
 
     for (auto& window : app->Windows)
-    {
-      for (auto& control : window->Controls)
-        control->OnUpdate(app, dt);
-
       window->OnUpdate(app, dt);
-    }
 }
 
 void ImGuiAppWindowLayer::OnRender(const ImGuiApp* app) const
@@ -364,7 +464,69 @@ void ImGuiAppWindowLayer::OnRender(const ImGuiApp* app) const
 
 namespace ImGui
 {
+  //-----------------------------------------------------------------------------
+  // Write-ahead log. The contract: a record is on disk BEFORE the operation it names runs, so a crash's
+  // forensics are one `tail` away -- the last line is the in-flight operation. fflush on every record is the
+  // cost of that guarantee; Lifecycle level is cheap (composition changes only), Frame level is for hunts.
+  //-----------------------------------------------------------------------------
+
+  IMGUI_API bool AppWALOpen(ImGuiAppWAL* wal, const char* path, ImGuiAppWALLevel level)
+  {
+      IM_ASSERT(wal != nullptr && path != nullptr);
+      if (wal == nullptr || path == nullptr)
+        return false;
+
+      AppWALClose(wal);
+      FILE* f = fopen(path, "wt");
+      if (f == nullptr)
+        return false;
+      wal->File = f;
+      wal->Seq = 0;
+      wal->Level = level;
+      ImStrncpy(wal->Path, path, IM_ARRAYSIZE(wal->Path));
+      AppWALWrite(wal, ImGuiAppWALLevel_Lifecycle, "wal open (level %d)", (int)level);
+      return true;
+  }
+
+  IMGUI_API void AppWALClose(ImGuiAppWAL* wal)
+  {
+      if (wal == nullptr || wal->File == nullptr)
+        return;
+      AppWALWrite(wal, ImGuiAppWALLevel_Lifecycle, "wal close");
+      fclose((FILE*)wal->File);
+      wal->File = nullptr;
+      wal->Level = ImGuiAppWALLevel_Off;
+  }
+
+  IMGUI_API void AppWALWrite(ImGuiAppWAL* wal, ImGuiAppWALLevel level, const char* fmt, ...)
+  {
+      if (wal == nullptr || wal->File == nullptr || level > wal->Level)
+        return;
+
+      char msg[512];
+      va_list args;
+      va_start(args, fmt);
+      ImFormatStringV(msg, IM_ARRAYSIZE(msg), fmt, args);
+      va_end(args);
+
+      // Frame number when an ImGui context exists (WAL must also work before/after the context's lifetime).
+      const int frame = ImGui::GetCurrentContext() != nullptr ? ImGui::GetFrameCount() : -1;
+      FILE* f = (FILE*)wal->File;
+      fprintf(f, "[%06d f%05d] %s\n", wal->Seq++, frame, msg);
+      fflush(f);   // the write-ahead guarantee
+  }
+
   IMGUI_API void RegisterAppStorage(ImGuiApp* app, ImGuiID id, void* ptr, void (*destroy)(void*))
+  {
+      RegisterAppStorage(app, id, ptr, 0, 0, 0, destroy);   // opaque: not snapshottable, no input range
+  }
+
+  IMGUI_API void RegisterAppStorage(ImGuiApp* app, ImGuiID id, void* ptr, int size, void (*destroy)(void*))
+  {
+      RegisterAppStorage(app, id, ptr, size, 0, 0, destroy);
+  }
+
+  IMGUI_API void RegisterAppStorage(ImGuiApp* app, ImGuiID id, void* ptr, int size, int temp_offset, int temp_size, void (*destroy)(void*))
   {
       IM_ASSERT(app);
       IM_ASSERT(id != 0);
@@ -373,6 +535,8 @@ namespace ImGui
 
       if (app == nullptr || id == 0 || ptr == nullptr)
         return;
+
+      AppWALWrite(app->WAL, ImGuiAppWALLevel_Lifecycle, "register storage 0x%08X (%d bytes, temp %d+%d)", (unsigned)id, size, temp_offset, temp_size);
 
       for (const ImGuiAppStorageEntry& entry : app->StorageEntries)
       {
@@ -384,8 +548,262 @@ namespace ImGui
       ImGuiAppStorageEntry entry;
       entry.ID = id;
       entry.Ptr = ptr;
+      entry.Size = size;
+      entry.TempOffset = temp_offset;
+      entry.TempSize = temp_size;
       entry.Destroy = destroy;
       app->StorageEntries.push_back(entry);
+  }
+
+  //-----------------------------------------------------------------------------
+  // Time travel. The state discipline makes this a theorem, not a feature: OnUpdate is the sole mutator and
+  // every control's durable state (Persist + LastTemp + Temp) lives in registered storage, so a byte copy of
+  // the snapshottable entries IS the app's state at that frame. Restore it and the app resumes from there --
+  // deterministically, because the next OnUpdate is a pure function of that state plus recorded input.
+  //-----------------------------------------------------------------------------
+
+  IMGUI_API void AppStateHistoryClear(ImGuiAppStateHistory* h)
+  {
+      IM_ASSERT(h != nullptr);
+      if (h == nullptr)
+        return;
+      h->CompositionID = 0;
+      h->FrameSize = 0;
+      h->Count = 0;
+      h->Head = 0;
+      h->SlotIds.clear();
+      h->SlotSizes.clear();
+      h->Frames.clear();
+  }
+
+  IMGUI_API bool AppStateSnapshot(ImGuiApp* app, ImGuiAppStateHistory* h)
+  {
+      IM_ASSERT(app != nullptr && h != nullptr);
+      if (app == nullptr || h == nullptr || h->MaxFrames <= 0)
+        return false;
+
+      // Composition changed (or first use): rebuild the slot layout and start the timeline over. A snapshot
+      // only means something against the composition it was taken from.
+      const ImGuiID comp = GetAppCompositionID(app);
+      if (comp != h->CompositionID || h->SlotIds.Size == 0)
+      {
+        AppStateHistoryClear(h);
+        h->CompositionID = comp;
+        for (int i = 0; i < app->StorageEntries.Size; i++)
+        {
+          const ImGuiAppStorageEntry& e = app->StorageEntries[i];
+          if (e.Size <= 0 || e.Ptr == nullptr)
+            continue;
+          h->SlotIds.push_back(e.ID);
+          h->SlotSizes.push_back(e.Size);
+          h->FrameSize += e.Size;
+        }
+        if (h->FrameSize == 0)
+          return false;
+        h->Frames.resize(h->MaxFrames * h->FrameSize);
+      }
+
+      char* dst = h->Frames.Data + h->Head * h->FrameSize;
+      for (int s = 0; s < h->SlotIds.Size; s++)
+      {
+        const void* src = app->Data.GetVoidPtr(h->SlotIds[s]);
+        if (src == nullptr)   // entry vanished without a composition change -- shouldn't happen; invalidate
+        {
+          AppStateHistoryClear(h);
+          return false;
+        }
+        memcpy(dst, src, (size_t)h->SlotSizes[s]);
+        dst += h->SlotSizes[s];
+      }
+      h->Head = (h->Head + 1) % h->MaxFrames;
+      if (h->Count < h->MaxFrames)
+        h->Count++;
+      return true;
+  }
+
+  // Hash of the app's DETERMINISTIC state: the Persist + LastTemp prefix of every snapshottable instance
+  // (TempData is this frame's raw input, not state -- excluded so record-time and replay-time hashes align).
+  static ImGuiID AppStateHash(ImGuiApp* app)
+  {
+      ImGuiID h = 0;
+      for (int i = 0; i < app->StorageEntries.Size; i++)
+      {
+        const ImGuiAppStorageEntry& e = app->StorageEntries[i];
+        const int state_bytes = e.TempSize > 0 ? e.TempOffset : e.Size;   // no temp range -> whole block is state
+        if (e.Size <= 0 || e.Ptr == nullptr || state_bytes <= 0)
+          continue;
+        h = ImHashData(e.Ptr, (size_t)state_bytes, h);
+      }
+      return h;
+  }
+
+  IMGUI_API void AppInputLogClear(ImGuiAppInputLog* log)
+  {
+      IM_ASSERT(log != nullptr);
+      if (log == nullptr)
+        return;
+      log->CompositionID = 0;
+      log->FrameSize = 0;
+      log->Count = 0;
+      log->SlotIds.clear();
+      log->SlotOffsets.clear();
+      log->SlotSizes.clear();
+      log->Frames.clear();
+      log->StateHashes.clear();
+  }
+
+  IMGUI_API bool AppInputRecord(ImGuiApp* app, ImGuiAppInputLog* log, float dt)
+  {
+      IM_ASSERT(app != nullptr && log != nullptr);
+      if (app == nullptr || log == nullptr)
+        return false;
+
+      const ImGuiID comp = GetAppCompositionID(app);
+      if (comp != log->CompositionID || log->FrameSize == 0)
+      {
+        AppInputLogClear(log);
+        log->CompositionID = comp;
+        log->FrameSize = (int)sizeof(float);   // dt always travels with the frame
+        for (int i = 0; i < app->StorageEntries.Size; i++)
+        {
+          const ImGuiAppStorageEntry& e = app->StorageEntries[i];
+          if (e.Size <= 0 || e.TempSize <= 0 || e.Ptr == nullptr)
+            continue;
+          log->SlotIds.push_back(e.ID);
+          log->SlotOffsets.push_back(e.TempOffset);
+          log->SlotSizes.push_back(e.TempSize);
+          log->FrameSize += e.TempSize;
+        }
+        if (log->SlotIds.Size == 0)
+        {
+          AppInputLogClear(log);
+          return false;   // nothing records input -> nothing to replay
+        }
+      }
+
+      const int base = log->Frames.Size;
+      log->Frames.resize(base + log->FrameSize);
+      char* dst = log->Frames.Data + base;
+      memcpy(dst, &dt, sizeof(float));
+      dst += sizeof(float);
+      for (int s = 0; s < log->SlotIds.Size; s++)
+      {
+        const char* inst = (const char*)app->Data.GetVoidPtr(log->SlotIds[s]);
+        if (inst == nullptr)
+        {
+          AppInputLogClear(log);
+          return false;
+        }
+        memcpy(dst, inst + log->SlotOffsets[s], (size_t)log->SlotSizes[s]);
+        dst += log->SlotSizes[s];
+      }
+      log->StateHashes.push_back(AppStateHash(app));
+      log->Count++;
+      return true;
+  }
+
+  IMGUI_API bool AppInputReplay(ImGuiApp* app, const ImGuiAppInputLog* log, int* out_first_divergence)
+  {
+      if (out_first_divergence != nullptr)
+        *out_first_divergence = -1;
+      IM_ASSERT(app != nullptr && log != nullptr);
+      if (app == nullptr || log == nullptr || log->Count == 0)
+        return false;
+      if (GetAppCompositionID(app) != log->CompositionID)
+        return false;
+
+      AppWALWrite(app->WAL, ImGuiAppWALLevel_Lifecycle, "replay %d recorded frames", log->Count);
+
+      // Alignment with the live loop: UpdateApp consumes the TempData already in place (the starting snapshot's,
+      // then each injected frame's), the injection AFTER update stands in for that frame's RenderApp recording.
+      // The state hash compares post-update, pre-inject -- exactly what AppInputRecord hashed.
+      for (int f = 0; f < log->Count; f++)
+      {
+        const char* src = log->Frames.Data + f * log->FrameSize;
+        float dt = 0.0f;
+        memcpy(&dt, src, sizeof(float));
+        src += sizeof(float);
+
+        UpdateApp(app, dt);
+
+        if (out_first_divergence != nullptr && *out_first_divergence < 0 && AppStateHash(app) != log->StateHashes[f])
+          *out_first_divergence = f;
+
+        for (int s = 0; s < log->SlotIds.Size; s++)
+        {
+          char* inst = (char*)app->Data.GetVoidPtr(log->SlotIds[s]);
+          if (inst == nullptr)
+            return false;
+          memcpy(inst + log->SlotOffsets[s], src, (size_t)log->SlotSizes[s]);
+          src += log->SlotSizes[s];
+        }
+      }
+      return true;
+  }
+
+  IMGUI_API bool AppStateRestore(ImGuiApp* app, ImGuiAppStateHistory* h, int index)
+  {
+      IM_ASSERT(app != nullptr && h != nullptr);
+      if (app == nullptr || h == nullptr || index < 0 || index >= h->Count)
+        return false;
+      if (GetAppCompositionID(app) != h->CompositionID)
+        return false;   // the world these bytes describe no longer exists
+
+      AppWALWrite(app->WAL, ImGuiAppWALLevel_Lifecycle, "restore state snapshot %d/%d", index, h->Count);
+
+      const int oldest = (h->Head - h->Count + h->MaxFrames) % h->MaxFrames;
+      const char* src = h->Frames.Data + ((oldest + index) % h->MaxFrames) * h->FrameSize;
+      for (int s = 0; s < h->SlotIds.Size; s++)
+      {
+        void* dst = app->Data.GetVoidPtr(h->SlotIds[s]);
+        if (dst == nullptr)
+          return false;
+        memcpy(dst, src, (size_t)h->SlotSizes[s]);
+        src += h->SlotSizes[s];
+      }
+      return true;
+  }
+
+  IMGUI_API void UnregisterAppStorage(ImGuiApp* app, ImGuiID id)
+  {
+      IM_ASSERT(app);
+      IM_ASSERT(id != 0);
+      if (app == nullptr || id == 0)
+        return;
+
+      AppWALWrite(app->WAL, ImGuiAppWALLevel_Lifecycle, "unregister storage 0x%08X", (unsigned)id);
+
+      for (int i = 0; i < app->StorageEntries.Size; i++)
+      {
+        ImGuiAppStorageEntry& entry = app->StorageEntries[i];
+        if (entry.ID != id)
+          continue;
+        if (entry.Destroy != nullptr && entry.Ptr != nullptr)
+          entry.Destroy(entry.Ptr);
+        app->StorageEntries.erase(app->StorageEntries.Data + i);
+        app->Data.SetVoidPtr(id, nullptr);   // ImGuiStorage keeps the key; a null slot reads as absent
+        return;
+      }
+  }
+
+  IMGUI_API ImGuiID GetAppCompositionID(const ImGuiApp* app)
+  {
+      IM_ASSERT(app);
+      if (app == nullptr)
+        return 0;
+
+      ImGuiID h = ImHashData(&app->Layers.Size, sizeof(app->Layers.Size), 0);
+      for (int i = 0; i < app->Windows.Size; i++)
+        h = ImHashStr(app->Windows.Data[i]->Label, 0, h);
+      for (int i = 0; i < app->Sidebars.Size; i++)
+        h = ImHashStr(app->Sidebars.Data[i]->Label, 0, h);
+      ForEachAppControl(app, [&h](const ImGuiAppControlBase* control, const ImGuiAppWindowBase* host)
+      {
+        IM_UNUSED(host);
+        const ImGuiID id = control->GetControlDataID();
+        h = ImHashData(&id, sizeof(id), h);
+      });
+      return h;
   }
 
   IMGUI_API void ClearAppStorage(ImGuiApp* app)
@@ -429,6 +847,7 @@ namespace ImGui
         app->ClearColor = config->ClearColor;
       }
 
+      AppWALWrite(app->WAL, ImGuiAppWALLevel_Lifecycle, "initialize app");
       app->ShutdownPending = false;
       PushAppLayer<ImGuiAppTaskLayer>(app);
       PushAppLayer<ImGuiAppCommandLayer>(app);
@@ -441,6 +860,8 @@ namespace ImGui
       IM_ASSERT(app);
       if (app == nullptr)
         return;
+
+      AppWALWrite(app->WAL, ImGuiAppWALLevel_Lifecycle, "shutdown app");
 
       while (!app->Sidebars.empty())
         PopAppSidebar(app);
@@ -456,17 +877,30 @@ namespace ImGui
 
   IMGUI_API void UpdateApp(ImGuiApp* app)
   {
+      UpdateApp(app, GetIO().DeltaTime);
+  }
+
+  IMGUI_API void UpdateApp(ImGuiApp* app, float dt)
+  {
       IM_ASSERT(app);
 
+      AppWALWrite(app->WAL, ImGuiAppWALLevel_Frame, "frame update begin");
       for (auto& layer : app->Layers)
-        layer->OnUpdate(app, GetIO().DeltaTime);
+      {
+        AppWALWrite(app->WAL, ImGuiAppWALLevel_Frame, "update %s", layer->Label);
+        layer->OnUpdate(app, dt);
+      }
   }
 
   IMGUI_API void RenderApp(const ImGuiApp* app)
   {
       IM_ASSERT(app);
 
+      AppWALWrite(app->WAL, ImGuiAppWALLevel_Frame, "frame render begin");
       for (auto& layer : app->Layers)
+      {
+        AppWALWrite(app->WAL, ImGuiAppWALLevel_Frame, "render %s", layer->Label);
         layer->OnRender(app);
+      }
   }
 }

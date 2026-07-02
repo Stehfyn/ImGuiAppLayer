@@ -64,6 +64,10 @@ struct ImGuiAppWindowBase;                   //
 // Forward declarations: ImGuiAppSidebar layer
 struct ImGuiAppSidebarBase;                  //
 
+// Forward declarations: state history + input log (time travel / record-replay)
+struct ImGuiAppStateHistory;                 //
+struct ImGuiAppInputLog;                     //
+
 enum ImGuiAppCommand
 {
   ImGuiAppCommand_None,
@@ -74,6 +78,29 @@ enum ImGuiAppCommand
 enum ImGuiAppCommandPrivate
 {
   ImGuiAppCommandPrivate_ = ImGuiAppCommand_COUNT,
+};
+
+// Write-ahead logger. Each record is appended AND flushed BEFORE the operation it names executes -- the
+// database WAL discipline applied to the app pipeline -- so after a crash the tail of the file names the
+// operation that was in flight. Attach one to ImGuiApp::WAL and the framework logs its own events: layer /
+// window / sidebar / control push+pop, storage registration, command dispatch, and (at Frame level) every
+// per-frame phase begin. No dependency beyond stdio; a null ImGuiApp::WAL costs one branch per site.
+typedef int ImGuiAppWALLevel;
+enum ImGuiAppWALLevel_
+{
+  ImGuiAppWALLevel_Off = 0,
+  ImGuiAppWALLevel_Lifecycle,   // composition changes, storage, command dispatch
+  ImGuiAppWALLevel_Frame,       // + per-frame per-layer phase begins (crash hunts; large files)
+};
+
+struct ImGuiAppWAL
+{
+  void*            File;        // FILE*; typed void* to keep <cstdio> out of this header
+  int              Seq;         // monotonic record number
+  ImGuiAppWALLevel Level;
+  char             Path[256];
+
+  ImGuiAppWAL() { File = nullptr; Seq = 0; Level = ImGuiAppWALLevel_Off; Path[0] = 0; }
 };
 
 // Platform backend interface. The core app layer depends only on this vtable; it never
@@ -199,6 +226,47 @@ inline static void GenerateLabel(char* label, size_t size) { std::string_view sv
 template <typename T>
 inline static void GenerateUniqueLabel(char* label, size_t size) { std::string_view sv = ImGuiType<T>::Name; ImFormatString(label, size, "%.*s##%d", (int)sv.size(), sv.data(), ImGuiType<T>::GetRelativeID()); }
 
+// Event identification, named. OnUpdate receives BOTH this frame's TempData and last frame's precisely so user
+// code can derive events from state deltas instead of storing flags: rising = it started, falling = it ended,
+// changed = either transition (the demo's `temp_data->hovered ^ last_temp_data->hovered`). These helpers are
+// that comparison vocabulary spelled out; the raw operators remain equally idiomatic.
+inline static bool ImAppRising (bool now, bool last) { return now && !last; }
+inline static bool ImAppFalling(bool now, bool last) { return !now && last; }
+inline static bool ImAppChanged(bool now, bool last) { return now ^ last; }
+template <typename T>
+inline static bool ImAppChanged(const T& now, const T& last) { return !(now == last); }
+
+// Deterministic effects. A hidden effect source (rand(), a clock) breaks the replay theorem: OnUpdate stops
+// being a pure function of (state, input, dt). Keep the effect IN the state instead -- a PRNG whose seed
+// lives in PersistData is stepped by OnUpdate like any other field, so snapshots capture it and replays
+// reproduce it exactly. splitmix64: one u64 of state, solid distribution, no global anywhere. Seed once in
+// OnInitialize (an init-time clock read is fine -- it becomes state), then only ever step through the seed.
+inline static ImU64 ImAppRandom(ImU64* seed)
+{
+  ImU64 z = (*seed += 0x9E3779B97F4A7C15ull);
+  z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+  z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+  return z ^ (z >> 31);
+}
+inline static float ImAppRandomFloat(ImU64* seed, float mn, float mx)   // uniform in [mn, mx)
+{
+  return mn + (mx - mn) * (float)(ImAppRandom(seed) >> 40) / (float)(1ull << 24);
+}
+inline static int ImAppRandomInt(ImU64* seed, int mn, int mx)           // uniform in [mn, mx]
+{
+  return mx <= mn ? mn : mn + (int)(ImAppRandom(seed) % (ImU64)(mx - mn + 1));
+}
+
+// Best-effort symbolized backtrace of the CALLER, written into out as "  #N name (file:line)" lines. Returns
+// the number of characters written. skip_frames drops innermost frames (0 = include the caller of this
+// function). Win32: CaptureStackBackTrace + DbgHelp; other platforms currently write an empty string.
+IMGUI_API int ImStackTrace(char* out, int out_size, int skip_frames = 0);
+
+// IM_ASSERT sink (wired via IMGUI_USER_CONFIG -> imguix_imconfig.h): logs expr/file/line + ImStackTrace to
+// the WAL registered with ImGui::SetAppAssertWAL and to stderr, flushes (write-ahead), then __debugbreak()s
+// under a debugger or exits with code 3 -- never the blocking CRT assert popup.
+IMGUI_API void ImGuiAppAssertFail(const char* expr, const char* file, int line);
+
 struct ImGuiColorModEx
 {
   ImGuiColorMod ColorMod;
@@ -220,10 +288,47 @@ namespace ImGui
 {
   IMGUI_API void InitializeApp(ImGuiApp* app, const ImGuiAppConfig* config = nullptr);
   IMGUI_API void ShutdownApp(ImGuiApp* app);
-  IMGUI_API void UpdateApp(ImGuiApp* app);
+  IMGUI_API void UpdateApp(ImGuiApp* app);                    // dt = GetIO().DeltaTime
+  IMGUI_API void UpdateApp(ImGuiApp* app, float dt);          // explicit dt: the transition function's real signature (replay injects here)
   IMGUI_API void RenderApp(const ImGuiApp* app);
   IMGUI_API void RegisterAppStorage(ImGuiApp* app, ImGuiID id, void* ptr, void (*destroy)(void*));
+  IMGUI_API void RegisterAppStorage(ImGuiApp* app, ImGuiID id, void* ptr, int size, void (*destroy)(void*));   // size > 0 => snapshottable
+  IMGUI_API void RegisterAppStorage(ImGuiApp* app, ImGuiID id, void* ptr, int size, int temp_offset, int temp_size, void (*destroy)(void*));   // + input (TempData) byte range
+  IMGUI_API void UnregisterAppStorage(ImGuiApp* app, ImGuiID id);   // destroys + removes one entry (pop symmetry)
   IMGUI_API void ClearAppStorage(ImGuiApp* app);
+
+  // Time travel. Snapshot appends the app's snapshottable state to the ring (rebuilding the layout and
+  // clearing history when the composition changed); Restore copies snapshot `index` (0 = oldest) back into
+  // the live app. Both return false when nothing snapshottable exists / index or composition is invalid.
+  IMGUI_API bool AppStateSnapshot(ImGuiApp* app, ImGuiAppStateHistory* h);
+  IMGUI_API bool AppStateRestore(ImGuiApp* app, ImGuiAppStateHistory* h, int index);
+  IMGUI_API void AppStateHistoryClear(ImGuiAppStateHistory* h);
+
+  // Record/replay. AppInputRecord appends this frame's inputs (every control's TempData + dt) and the
+  // resulting state hash -- call it once per frame AFTER RenderApp. AppInputReplay re-runs the recorded
+  // frames through UpdateApp (no rendering; injected inputs stand in for it) -- restore the starting state
+  // first (AppStateRestore or a fresh identical bring-up). If out_first_divergence is non-null it receives
+  // the first frame whose state hash differs from the recording (-1 = deterministic reproduction), which
+  // names the exact frame a control consulted a hidden effect (rand(), clock, ...) instead of its state.
+  IMGUI_API bool AppInputRecord(ImGuiApp* app, ImGuiAppInputLog* log, float dt);
+  IMGUI_API bool AppInputReplay(ImGuiApp* app, const ImGuiAppInputLog* log, int* out_first_divergence);
+  IMGUI_API void AppInputLogClear(ImGuiAppInputLog* log);
+
+  // Write-ahead log. AppWALWrite appends one record and flushes it to disk BEFORE returning (that ordering is
+  // the whole point); records below the WAL's level are dropped. All three are null-safe on wal.
+  IMGUI_API bool AppWALOpen(ImGuiAppWAL* wal, const char* path, ImGuiAppWALLevel level);
+  IMGUI_API void AppWALClose(ImGuiAppWAL* wal);
+  IMGUI_API void AppWALWrite(ImGuiAppWAL* wal, ImGuiAppWALLevel level, const char* fmt, ...) IM_FMTARGS(3);
+
+  // Assert forensics. When IMGUI_USER_CONFIG routes IM_ASSERT to ImGuiAppAssertFail (imguix does), a failed
+  // assert writes the expression, location and a symbolized ImStackTrace to this WAL sink + stderr, then
+  // breaks into the debugger if one is attached or exits -- never the blocking CRT popup.
+  IMGUI_API void SetAppAssertWAL(ImGuiAppWAL* wal);
+
+  // Identity of the app's composition: layers (count), windows/sidebars (labels, in order), controls (data type
+  // ids, in update order). Changes exactly when something is pushed or popped, so mirrors of the object model
+  // (e.g. the node editor's live graph) can poll it cheaply and reconcile only on change.
+  IMGUI_API ImGuiID GetAppCompositionID(const ImGuiApp* app);
 
   template <typename T>
   inline void PushAppSidebar(ImGuiApp* app, ImGuiViewport* vp, ImGuiDir dir, float size = 0.0f, ImGuiWindowFlags flags = 0);
@@ -361,7 +466,49 @@ struct ImGuiAppStorageEntry
 {
   ImGuiID ID = 0;
   void* Ptr = nullptr;
+  int Size = 0;                       // byte size when the data is snapshottable (trivially copyable); 0 = opaque
+  int TempOffset = 0;                 // byte range of the TempData member inside the instance data -- the
+  int TempSize = 0;                   // control's per-frame INPUT; [0, TempOffset) is Persist + LastTemp (state)
   void (*Destroy)(void*) = nullptr;
+};
+
+// App state history: byte snapshots of every SNAPSHOTTABLE storage entry (the push helpers register a size
+// automatically when a control's instance data is trivially copyable; opaque entries are skipped). Because
+// OnUpdate is the sole mutator and all durable state lives in app->Data, restoring a frame's bytes IS time
+// travel -- the state discipline pays out as deterministic scrub/replay for ANY framework app, no per-app
+// code. A ring of MaxFrames snapshots; the layout is keyed to GetAppCompositionID and rebuilt (history
+// cleared) when the composition changes.
+struct ImGuiAppStateHistory
+{
+  ImGuiID           CompositionID;   // layout is valid for exactly this composition
+  int               FrameSize;       // bytes per snapshot (sum of slot sizes)
+  int               MaxFrames;       // ring capacity (default 600 ~ 10s at 60fps)
+  int               Count;           // valid snapshots
+  int               Head;            // ring write index
+  ImVector<ImGuiID> SlotIds;         // storage entry per slot, in StorageEntries order
+  ImVector<int>     SlotSizes;
+  ImVector<char>    Frames;          // MaxFrames * FrameSize bytes
+
+  ImGuiAppStateHistory() { CompositionID = 0; FrameSize = 0; MaxFrames = 600; Count = 0; Head = 0; }
+};
+
+// Input log: the OTHER half of the determinism theorem. A frame's inputs are exactly the controls' TempData
+// (recorded by OnRender) plus dt -- bytes per frame, not kilobytes -- so re-running OnUpdate from one starting
+// snapshot with those inputs injected reproduces the whole run. Each frame also stores a hash of the
+// resulting STATE (the Persist+LastTemp prefix of every instance), so replay can pinpoint the first frame a
+// control diverged: hidden effects (rand(), clocks) become a diagnosed defect instead of silent drift.
+struct ImGuiAppInputLog
+{
+  ImGuiID           CompositionID;   // layout is valid for exactly this composition
+  int               FrameSize;       // bytes per frame: sum of temp sizes + sizeof(float) dt
+  int               Count;           // recorded frames
+  ImVector<ImGuiID> SlotIds;         // storage entry per slot, in StorageEntries order
+  ImVector<int>     SlotOffsets;     // TempData offset within each instance
+  ImVector<int>     SlotSizes;       // TempData size
+  ImVector<char>    Frames;          // Count * FrameSize bytes, appended (caller clears between takes)
+  ImVector<ImGuiID> StateHashes;     // per-frame post-update state hash (replay divergence reference)
+
+  ImGuiAppInputLog() { CompositionID = 0; FrameSize = 0; Count = 0; }
 };
 
 struct ImGuiApp : ImGuiAppBase
@@ -375,9 +522,10 @@ struct ImGuiApp : ImGuiAppBase
   ImGuiAppPlatform               Platform;
   ImVec4                         ClearColor;
   void*                          PlatformData;
+  ImGuiAppWAL*                   WAL;           // optional write-ahead logger (caller-owned); null = silent
   bool                           Initialized;
 
-  ImGuiApp() : PlatformData(nullptr), Initialized(false) {}
+  ImGuiApp() : PlatformData(nullptr), WAL(nullptr), Initialized(false) {}
   virtual ~ImGuiApp();
   int                         Run(int argc, char** argv);
   bool                        Initialize(const ImGuiAppConfig* config);
@@ -526,6 +674,38 @@ namespace ImGui
       IM_DELETE(static_cast<T*>(ptr));
   }
 
+  // Visit every pushed control -- app-level first, then sidebar-hosted, then window-hosted (update order).
+  // visitor(ImGuiAppControlBase* control, ImGuiAppWindowBase* host) with host == nullptr for app-level. This is
+  // the ONE enumeration the layers, the command pipeline, and object-model mirrors (the node editor) share, so
+  // "all controls" cannot drift between them.
+  template <typename Visitor>
+  inline void ForEachAppControl(ImGuiApp* app, Visitor visitor)
+  {
+      IM_ASSERT(app);
+      for (int i = 0; i < app->Controls.Size; i++)
+        visitor(app->Controls.Data[i], (ImGuiAppWindowBase*)nullptr);
+      for (int s = 0; s < app->Sidebars.Size; s++)
+        for (int i = 0; i < app->Sidebars.Data[s]->Controls.Size; i++)
+          visitor(app->Sidebars.Data[s]->Controls.Data[i], (ImGuiAppWindowBase*)app->Sidebars.Data[s]);
+      for (int w = 0; w < app->Windows.Size; w++)
+        for (int i = 0; i < app->Windows.Data[w]->Controls.Size; i++)
+          visitor(app->Windows.Data[w]->Controls.Data[i], app->Windows.Data[w]);
+  }
+
+  template <typename Visitor>
+  inline void ForEachAppControl(const ImGuiApp* app, Visitor visitor)
+  {
+      IM_ASSERT(app);
+      for (int i = 0; i < app->Controls.Size; i++)
+        visitor((const ImGuiAppControlBase*)app->Controls.Data[i], (const ImGuiAppWindowBase*)nullptr);
+      for (int s = 0; s < app->Sidebars.Size; s++)
+        for (int i = 0; i < app->Sidebars.Data[s]->Controls.Size; i++)
+          visitor((const ImGuiAppControlBase*)app->Sidebars.Data[s]->Controls.Data[i], (const ImGuiAppWindowBase*)app->Sidebars.Data[s]);
+      for (int w = 0; w < app->Windows.Size; w++)
+        for (int i = 0; i < app->Windows.Data[w]->Controls.Size; i++)
+          visitor((const ImGuiAppControlBase*)app->Windows.Data[w]->Controls.Data[i], (const ImGuiAppWindowBase*)app->Windows.Data[w]);
+  }
+
   inline void ShutdownAppControls(ImGuiApp* app, ImVector<ImGuiAppControlBase*>& controls)
   {
       IM_ASSERT(app);
@@ -534,8 +714,17 @@ namespace ImGui
       {
         ImGuiAppControlBase* control = controls.back();
         controls.pop_back();
+        if (app->WAL != nullptr)
+        {
+          char dt[IM_LABEL_SIZE];
+          control->GetControlDataTypeName(dt, IM_ARRAYSIZE(dt));
+          AppWALWrite(app->WAL, ImGuiAppWALLevel_Lifecycle, "shutdown control <%s>", dt);
+        }
         control->OnShutdown(app);
+        const ImGuiID data_id = control->GetControlDataID();   // the control's instance data dies with it
         IM_DELETE(control);
+        if (data_id != 0)
+          UnregisterAppStorage(app, data_id);
       }
   }
 
@@ -545,7 +734,13 @@ namespace ImGui
       //IM_STATIC_ASSERT((std::is_base_of_v<ImGuiAppLayerBase, T>));
       IM_ASSERT(app);
 
+      char name[IM_LABEL_SIZE];
+      GenerateLabel<T>(name, sizeof(name));
+      AppWALWrite(app->WAL, ImGuiAppWALLevel_Lifecycle, "push layer %s", name);
+
       app->Layers.push_back(IM_NEW(T)());
+      if (app->Layers.back()->Label[0] == 0)   // stamp the type name so per-layer WAL/frame records read well
+        ImStrncpy(app->Layers.back()->Label, name, IM_ARRAYSIZE(app->Layers.back()->Label));
       app->Layers.back()->OnAttach(app);
   }
 
@@ -558,6 +753,7 @@ namespace ImGui
 
       ImGuiAppLayerBase* layer = app->Layers.back();
       app->Layers.pop_back();
+      AppWALWrite(app->WAL, ImGuiAppWALLevel_Lifecycle, "pop layer %s", layer->Label);
       layer->OnDetach(app);
       IM_DELETE(layer);
   }
@@ -566,6 +762,9 @@ namespace ImGui
   inline void PushAppWindow(ImGuiApp* app)
   {
     IM_ASSERT(app);
+    char name[IM_LABEL_SIZE];
+    GenerateLabel<T>(name, sizeof(name));
+    AppWALWrite(app->WAL, ImGuiAppWALLevel_Lifecycle, "push window %s", name);
     T* window = IM_NEW(T)();
     IM_ASSERT(window);
     app->Windows.push_back(window);
@@ -581,6 +780,7 @@ namespace ImGui
 
     ImGuiAppWindowBase* window = app->Windows.back();
     app->Windows.pop_back();
+    AppWALWrite(app->WAL, ImGuiAppWALLevel_Lifecycle, "pop window '%s'", window->Label);
     ShutdownAppControls(app, window->Controls);
     window->OnShutdown(app);
     IM_DELETE(window);
@@ -590,6 +790,9 @@ namespace ImGui
   inline void PushAppSidebar(ImGuiApp* app, ImGuiViewport* vp, ImGuiDir dir, float size, ImGuiWindowFlags flags)
   {
     IM_ASSERT(app);
+    char name[IM_LABEL_SIZE];
+    GenerateLabel<T>(name, sizeof(name));
+    AppWALWrite(app->WAL, ImGuiAppWALLevel_Lifecycle, "push sidebar %s", name);
     T* sidebar = IM_NEW(T)();
     IM_ASSERT(sidebar);
     sidebar->Viewport = vp;
@@ -608,6 +811,7 @@ namespace ImGui
       return;
     ImGuiAppSidebarBase* sidebar = app->Sidebars.back();
     app->Sidebars.pop_back();
+    AppWALWrite(app->WAL, ImGuiAppWALLevel_Lifecycle, "pop sidebar '%s'", sidebar->Label);
     ShutdownAppControls(app, sidebar->Controls);
     sidebar->OnShutdown(app);
     IM_DELETE(sidebar);
@@ -617,6 +821,10 @@ namespace ImGui
   inline void PushAppControl(ImGuiApp* app)
   {
       IM_ASSERT(app);
+
+      char name[IM_LABEL_SIZE];
+      GenerateLabel<T>(name, sizeof(name));
+      AppWALWrite(app->WAL, ImGuiAppWALLevel_Lifecycle, "push control %s", name);
 
       // Use the control's data type hash for instance data storage/retrieval (so other controls which depend on instance_data->ControlData may access it)
       ImGuiID id = ImGuiType<typename T::ControlDataType>::ID;
@@ -632,7 +840,16 @@ namespace ImGui
       IM_ASSERT(instance_data);
 
       app->Data.SetVoidPtr(id, instance_data);
-      RegisterAppStorage(app, id, instance_data, DestroyAppStorageValue<typename T::ControlInstanceDataType>);
+      // Trivially-copyable instance data registers its size (byte-snapshot time travel) and its TempData byte
+      // range (input recording for replay); anything owning heap (ImVector members etc.) registers opaque.
+      {
+        const bool snapshottable = std::is_trivially_copyable_v<typename T::ControlInstanceDataType>;
+        RegisterAppStorage(app, id, instance_data,
+            snapshottable ? (int)sizeof(typename T::ControlInstanceDataType) : 0,
+            snapshottable ? (int)((char*)&instance_data->TempData - (char*)instance_data) : 0,
+            snapshottable ? (int)sizeof(instance_data->TempData) : 0,
+            DestroyAppStorageValue<typename T::ControlInstanceDataType>);
+      }
       app->Controls.push_back(control);
       app->Controls.back()->OnInitialize(app);
   }
@@ -646,8 +863,17 @@ namespace ImGui
 
       ImGuiAppControlBase* control = app->Controls.back();
       app->Controls.pop_back();
+      if (app->WAL != nullptr)
+      {
+        char dt[IM_LABEL_SIZE];
+        control->GetControlDataTypeName(dt, IM_ARRAYSIZE(dt));
+        AppWALWrite(app->WAL, ImGuiAppWALLevel_Lifecycle, "pop control <%s>", dt);
+      }
       control->OnShutdown(app);
-      IM_DELETE(control);
+      const ImGuiID data_id = control->GetControlDataID();   // pop symmetry: push registered it, pop frees it,
+      IM_DELETE(control);                                    // so the same control type can be pushed again
+      if (data_id != 0)
+        UnregisterAppStorage(app, data_id);
   }
 
   // Host a control INSIDE a window: its instance data is registered in app->Data like any control, but it is
@@ -657,6 +883,10 @@ namespace ImGui
   IMGUI_API inline void PushWindowControl(ImGuiApp* app, ImGuiAppWindowBase* window)
   {
       IM_ASSERT(app && window);
+
+      char name[IM_LABEL_SIZE];
+      GenerateLabel<T>(name, sizeof(name));
+      AppWALWrite(app->WAL, ImGuiAppWALLevel_Lifecycle, "push control %s into window '%s'", name, window->Label);
 
       // Use the control's data type hash for instance data storage/retrieval (so other controls which depend on instance_data->ControlData may access it)
       ImGuiID id = ImGuiType<typename T::ControlDataType>::ID;
@@ -672,7 +902,16 @@ namespace ImGui
       IM_ASSERT(instance_data);
 
       app->Data.SetVoidPtr(id, instance_data);
-      RegisterAppStorage(app, id, instance_data, DestroyAppStorageValue<typename T::ControlInstanceDataType>);
+      // Trivially-copyable instance data registers its size (byte-snapshot time travel) and its TempData byte
+      // range (input recording for replay); anything owning heap (ImVector members etc.) registers opaque.
+      {
+        const bool snapshottable = std::is_trivially_copyable_v<typename T::ControlInstanceDataType>;
+        RegisterAppStorage(app, id, instance_data,
+            snapshottable ? (int)sizeof(typename T::ControlInstanceDataType) : 0,
+            snapshottable ? (int)((char*)&instance_data->TempData - (char*)instance_data) : 0,
+            snapshottable ? (int)sizeof(instance_data->TempData) : 0,
+            DestroyAppStorageValue<typename T::ControlInstanceDataType>);
+      }
       window->Controls.push_back(control);
       window->Controls.back()->OnInitialize(app);
   }
@@ -685,6 +924,10 @@ namespace ImGui
       typename T::ControlInstanceDataType* instance_data;
 
       IM_ASSERT(app);
+
+      char name[IM_LABEL_SIZE];
+      GenerateLabel<T>(name, sizeof(name));
+      AppWALWrite(app->WAL, ImGuiAppWALLevel_Lifecycle, "push control %s into sidebar '%s'", name, sidebar ? sidebar->Label : "(null)");
 
       // Use the control's data type hash for instance data storage/retrieval (so other controls which depend on instance_data->ControlData may access it)
       id = ImGuiType<typename T::ControlDataType>::ID;
@@ -700,7 +943,16 @@ namespace ImGui
       IM_ASSERT(instance_data);
 
       app->Data.SetVoidPtr(id, instance_data);
-      RegisterAppStorage(app, id, instance_data, DestroyAppStorageValue<typename T::ControlInstanceDataType>);
+      // Trivially-copyable instance data registers its size (byte-snapshot time travel) and its TempData byte
+      // range (input recording for replay); anything owning heap (ImVector members etc.) registers opaque.
+      {
+        const bool snapshottable = std::is_trivially_copyable_v<typename T::ControlInstanceDataType>;
+        RegisterAppStorage(app, id, instance_data,
+            snapshottable ? (int)sizeof(typename T::ControlInstanceDataType) : 0,
+            snapshottable ? (int)((char*)&instance_data->TempData - (char*)instance_data) : 0,
+            snapshottable ? (int)sizeof(instance_data->TempData) : 0,
+            DestroyAppStorageValue<typename T::ControlInstanceDataType>);
+      }
       sidebar->Controls.push_back(control);
       sidebar->Controls.back()->OnInitialize(app);
   }
