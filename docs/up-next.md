@@ -26,11 +26,10 @@ of the USER'S composed app:
 
 ## Now
 
-- **Sequence-order editing** — drag execution badges to reorder pushes inside a scope; order is
-  model state, codegen emits it. (Reading the sequence exists; writing it doesn't.)
-- **Event expression checking** — `Expr` is emitted verbatim today. Type-check against the
-  effective field lists; grow a tiny expression grammar (field refs, dep refs, literals) so events
-  stay analyzable instead of stringly.
+- **Sequence-order editing** — drag execution badges to reorder pushes inside a scope (plus a
+  click-nudge fallback); order is model state, codegen emits it. (Reading the sequence exists;
+  writing it doesn't.) Hard constraint: the four core phase layers never reorder relative to one
+  another — only pushes within a scope / custom layers move.
 - **Scope-local tidy polish** — per-scope sequence layout (arrange members left-to-right in
   execution order on demand), remember camera per scope.
 
@@ -64,6 +63,13 @@ of the USER'S composed app:
   acknowledged tech debt; fold into the command pipeline once payloads exist.
 
 ## Recently landed (2026-07-01)
+
+- **Event expression checking** — `AppEventExprCheck`: tiny grammar (field refs
+  `temp_data->x` / `last_temp_data->x` / `data->x` / `<dep_param>-><field>`, struct members via
+  `.`, literals, parens, scalar operators at C precedence; `^` pairs bools — the change idiom — or
+  ints) parsed + type-checked against the effective field lists, result checked against DstField.
+  Wired into AppGraphValidate (error severity) and the events editor (live inline diagnostic).
+  Expr is still emitted verbatim, but a checked one is analyzable data, not a string.
 
 - **Core phases are immutable; Custom layers are authorable.** The four core layers lost their type combo
   (they were never interchangeable) and cannot be added, deleted, or retyped. New `ImGuiAppLayerType_Custom`:

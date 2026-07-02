@@ -2091,6 +2091,18 @@ namespace ImGui
         ImGui::TextDisabled("=");
         ImGui::SameLine();
         AppBlInputText("##expr", ev->Expr, IM_ARRAYSIZE(ev->Expr), em * 10.0f);
+
+        // Type-check the expression live -- verbatim emission means a bad expr surfaces at compile
+        // time otherwise, far from where it was typed.
+        char eerr[192];
+        if (!AppEventExprCheck(g, n, ev, eerr, IM_ARRAYSIZE(eerr)))
+        {
+          ImGui::Dummy(ImVec2(em * 1.6f, 0.0f));
+          ImGui::SameLine();
+          ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(235, 110, 95, 255));
+          ImGui::TextWrapped("%s", eerr);
+          ImGui::PopStyleColor();
+        }
       }
       else
       {
@@ -5260,6 +5272,9 @@ namespace ImGui
               AppValidatePushIssue(out, n->Id, 1, "%s: event on '%s' has no destination field", n->Draft.Name, ev->TempField);
             else if (AppNodeEffectiveFieldType(g, n, 0, ev->DstField) < 0)
               AppValidatePushIssue(out, n->Id, 2, "%s: event writes missing persist field '%s'", n->Draft.Name, ev->DstField);
+            char eerr[192];
+            if (!AppEventExprCheck(g, n, ev, eerr, IM_ARRAYSIZE(eerr)))
+              AppValidatePushIssue(out, n->Id, 2, "%s: event expr '%s': %s", n->Draft.Name, ev->Expr, eerr);
           }
           else if (ev->Action == ImGuiAppEventAction_EmitCommand)
           {
@@ -5784,6 +5799,416 @@ namespace ImGui
         if (!dup) out_producers->push_back(dep_id);
       }
     }
+  }
+
+  //-----------------------------------------------------------------------------
+  // [SECTION] Event expression checking (AppEventExprCheck)
+  //-----------------------------------------------------------------------------
+  // Expr is emitted verbatim into the generated OnUpdate, so anything rejected here might still be legal
+  // C++ -- but then the event is no longer analyzable data. The grammar is deliberately tiny; growing it
+  // is fine as long as every construct stays type-checkable against the authored field lists.
+
+  enum { AppExprType_Unknown = -2 };   // a builtin dep's field: lives in compiled C++, compatible with everything
+
+  struct AppExprCtx
+  {
+    const ImGuiAppGraph* Graph;
+    const ImGuiAppNode*  Node;
+    const char*          Cur;
+    bool                 Failed;
+    char                 Err[192];
+    char                 StructType[IM_LABEL_SIZE];   // set when the last primary was a whole struct-field ref
+  };
+
+  static int AppExprFail(AppExprCtx* c, const char* fmt, ...)
+  {
+    if (!c->Failed)
+    {
+      va_list args;
+      va_start(args, fmt);
+      ImFormatStringV(c->Err, IM_ARRAYSIZE(c->Err), fmt, args);
+      va_end(args);
+      c->Failed = true;
+    }
+    return AppExprType_Unknown;
+  }
+
+  static const char* AppExprTypeName(int t)
+  {
+    return (t >= 0 && t < ImGuiAppFieldType_COUNT) ? AppFieldTypeName((ImGuiAppFieldType)t) : "?";
+  }
+
+  static void AppExprSkipBlanks(AppExprCtx* c) { while (*c->Cur == ' ' || *c->Cur == '\t') c->Cur++; }
+
+  // Consume `op` if it is next. Longer operators must be tried first at each level; '-' refuses '->' and
+  // '!' refuses '!=' so unary parsing cannot eat half of a two-char token.
+  static bool AppExprAccept(AppExprCtx* c, const char* op)
+  {
+    AppExprSkipBlanks(c);
+    const size_t len = strlen(op);
+    if (strncmp(c->Cur, op, len) != 0) return false;
+    if (len == 1 && op[0] == '-' && c->Cur[1] == '>') return false;
+    if (len == 1 && op[0] == '!' && c->Cur[1] == '=') return false;
+    if (len == 1 && (op[0] == '<' || op[0] == '>') && c->Cur[1] == '=') return false;
+    c->Cur += len;
+    return true;
+  }
+
+  static bool AppExprIdent(AppExprCtx* c, char* out, int out_size)
+  {
+    AppExprSkipBlanks(c);
+    const char* s = c->Cur;
+    if (!((*s >= 'a' && *s <= 'z') || (*s >= 'A' && *s <= 'Z') || *s == '_')) return false;
+    int n = 0;
+    while ((*s >= 'a' && *s <= 'z') || (*s >= 'A' && *s <= 'Z') || (*s >= '0' && *s <= '9') || *s == '_')
+    {
+      if (n < out_size - 1) out[n++] = *s;
+      s++;
+    }
+    out[n] = 0;
+    c->Cur = s;
+    return true;
+  }
+
+  static bool AppExprIsNumeric(int t) { return t == ImGuiAppFieldType_Float || t == ImGuiAppFieldType_Int || t == ImGuiAppFieldType_Double || t == AppExprType_Unknown; }
+  static bool AppExprIsBool(int t)    { return t == ImGuiAppFieldType_Bool || t == AppExprType_Unknown; }
+  static bool AppExprIsInt(int t)     { return t == ImGuiAppFieldType_Int || t == AppExprType_Unknown; }
+
+  static int AppExprPromote(int a, int b)
+  {
+    if (a == AppExprType_Unknown || b == AppExprType_Unknown) return AppExprType_Unknown;
+    if (a == ImGuiAppFieldType_Double || b == ImGuiAppFieldType_Double) return ImGuiAppFieldType_Double;
+    if (a == ImGuiAppFieldType_Float || b == ImGuiAppFieldType_Float) return ImGuiAppFieldType_Float;
+    return ImGuiAppFieldType_Int;
+  }
+
+  // `ident` in owner's effective (list) fields, matched by the sanitized name codegen emits. Returns the
+  // field type (Struct fields also copy out their StructType) or -1.
+  static int AppExprLookupField(const ImGuiAppGraph* g, const ImGuiAppNode* owner, int list, const char* ident, char* struct_type, int struct_type_size)
+  {
+    ImVector<ImGuiAppFieldDesc> fields;
+    AppNodeEffectiveFields(g, owner, list, &fields);
+    for (int i = 0; i < fields.Size; i++)
+    {
+      char id[IM_LABEL_SIZE];
+      AppSanitizeIdentifier(id, IM_ARRAYSIZE(id), fields.Data[i].Name);
+      if (strcmp(id, ident) == 0)
+      {
+        if (struct_type != nullptr)
+          ImStrncpy(struct_type, fields.Data[i].StructType, struct_type_size);
+        return (int)fields.Data[i].Type;
+      }
+    }
+    return -1;
+  }
+
+  // Design Struct node whose (sanitized) name is `type_name`, or null.
+  static const ImGuiAppNode* AppExprFindStructNode(const ImGuiAppGraph* g, const char* type_name)
+  {
+    for (int i = 0; i < g->Nodes.Size; i++)
+    {
+      const ImGuiAppNode* sn = &g->Nodes.Data[i];
+      if (sn->IsLive || sn->Kind != ImGuiAppNodeKind_Struct) continue;
+      char id[IM_LABEL_SIZE];
+      AppSanitizeIdentifier(id, IM_ARRAYSIZE(id), sn->Draft.Name);
+      if (strcmp(sn->Draft.Name, type_name) == 0 || strcmp(id, type_name) == 0)
+        return sn;
+    }
+    return nullptr;
+  }
+
+  static int AppExprOr(AppExprCtx* c);   // fwd (parens recurse to the top)
+
+  static int AppExprPrimary(AppExprCtx* c)
+  {
+    AppExprSkipBlanks(c);
+    c->StructType[0] = 0;
+
+    if (AppExprAccept(c, "("))
+    {
+      const int t = AppExprOr(c);
+      if (c->Failed) return t;
+      if (!AppExprAccept(c, ")")) return AppExprFail(c, "missing ')'");
+      c->StructType[0] = 0;
+      return t;
+    }
+
+    // Number literal: digits [. digits] [f]. No suffix and no dot -> int.
+    if ((c->Cur[0] >= '0' && c->Cur[0] <= '9') || (c->Cur[0] == '.' && c->Cur[1] >= '0' && c->Cur[1] <= '9'))
+    {
+      bool is_float = false;
+      while (*c->Cur >= '0' && *c->Cur <= '9') c->Cur++;
+      if (*c->Cur == '.') { is_float = true; c->Cur++; while (*c->Cur >= '0' && *c->Cur <= '9') c->Cur++; }
+      if (*c->Cur == 'f' || *c->Cur == 'F') { is_float = true; c->Cur++; }
+      return is_float ? ImGuiAppFieldType_Float : ImGuiAppFieldType_Int;
+    }
+
+    char ident[IM_LABEL_SIZE];
+    if (!AppExprIdent(c, ident, IM_ARRAYSIZE(ident)))
+      return AppExprFail(c, "expected a value at '%.12s'", c->Cur[0] ? c->Cur : "<end>");
+    if (strcmp(ident, "true") == 0 || strcmp(ident, "false") == 0)
+      return ImGuiAppFieldType_Bool;
+
+    // Root -> field. Roots are the exact parameter names the generated OnUpdate receives.
+    const ImGuiAppNode* owner = nullptr;
+    int list = 0;
+    bool unverifiable = false;
+    if (strcmp(ident, "temp_data") == 0 || strcmp(ident, "last_temp_data") == 0) { owner = c->Node; list = 1; }
+    else if (strcmp(ident, "data") == 0) { owner = c->Node; list = 0; }
+    else
+    {
+      ImVector<int> deps;
+      AppGraphConsumerDeps(c->Graph, c->Node->Id, &deps);
+      for (int d = 0; d < deps.Size && owner == nullptr; d++)
+      {
+        const ImGuiAppNode* dn = AppGraphFindNodeConst(c->Graph, deps.Data[d]);
+        if (dn == nullptr) continue;
+        char param[IM_LABEL_SIZE];
+        AppToSnake(param, IM_ARRAYSIZE(param), dn->Draft.Name);
+        if (strcmp(param, ident) == 0) { owner = dn; list = 0; unverifiable = dn->IsBuiltin; }
+      }
+      if (owner == nullptr)
+        return AppExprFail(c, "unknown name '%s' (temp_data / last_temp_data / data / a dep param)", ident);
+    }
+    if (!AppExprAccept(c, "->"))
+      return AppExprFail(c, "'%s' needs '-><field>'", ident);
+    char field[IM_LABEL_SIZE];
+    if (!AppExprIdent(c, field, IM_ARRAYSIZE(field)))
+      return AppExprFail(c, "expected a field name after '%s->'", ident);
+
+    char stype[IM_LABEL_SIZE];
+    stype[0] = 0;
+    int t = AppExprLookupField(c->Graph, owner, list, field, stype, IM_ARRAYSIZE(stype));
+    if (t < 0)
+    {
+      if (!unverifiable)
+        return AppExprFail(c, "'%s' has no field '%s'", ident, field);
+      t = AppExprType_Unknown;
+    }
+
+    // Struct member chain: one '.' hop per nested level, each checked against that struct's field list.
+    // Unknown (builtin) chains are consumed unchecked.
+    for (;;)
+    {
+      AppExprSkipBlanks(c);
+      if (*c->Cur != '.' || (t != ImGuiAppFieldType_Struct && t != AppExprType_Unknown))
+        break;
+      c->Cur++;
+      char member[IM_LABEL_SIZE];
+      if (!AppExprIdent(c, member, IM_ARRAYSIZE(member)))
+        return AppExprFail(c, "expected a member after '.'");
+      if (t == AppExprType_Unknown)
+        continue;
+      const ImGuiAppNode* sn = AppExprFindStructNode(c->Graph, stype);
+      if (sn == nullptr) { t = AppExprType_Unknown; continue; }   // missing struct type is its own validate issue
+      char inner[IM_LABEL_SIZE];
+      inner[0] = 0;
+      t = AppExprLookupField(c->Graph, sn, 0, member, inner, IM_ARRAYSIZE(inner));
+      if (t < 0)
+        return AppExprFail(c, "struct '%s' has no field '%s'", stype, member);
+      ImStrncpy(stype, inner, IM_ARRAYSIZE(stype));
+    }
+    if (t == ImGuiAppFieldType_Struct)
+      ImStrncpy(c->StructType, stype, IM_ARRAYSIZE(c->StructType));
+    return t;
+  }
+
+  static int AppExprUnary(AppExprCtx* c)
+  {
+    if (AppExprAccept(c, "!"))
+    {
+      const int t = AppExprUnary(c);
+      if (c->Failed) return t;
+      c->StructType[0] = 0;
+      if (!AppExprIsBool(t)) return AppExprFail(c, "'!' needs a bool (got %s)", AppExprTypeName(t));
+      return ImGuiAppFieldType_Bool;
+    }
+    if (AppExprAccept(c, "-") || AppExprAccept(c, "+"))
+    {
+      const int t = AppExprUnary(c);
+      if (c->Failed) return t;
+      c->StructType[0] = 0;
+      if (!AppExprIsNumeric(t)) return AppExprFail(c, "unary '-'/'+' needs a number (got %s)", AppExprTypeName(t));
+      return t;
+    }
+    return AppExprPrimary(c);
+  }
+
+  static int AppExprMul(AppExprCtx* c)
+  {
+    int t = AppExprUnary(c);
+    while (!c->Failed)
+    {
+      char op;
+      if      (AppExprAccept(c, "*")) op = '*';
+      else if (AppExprAccept(c, "/")) op = '/';
+      else if (AppExprAccept(c, "%")) op = '%';
+      else break;
+      const int r = AppExprUnary(c);
+      if (c->Failed) return r;
+      c->StructType[0] = 0;
+      if (op == '%')
+      {
+        if (!AppExprIsInt(t) || !AppExprIsInt(r))
+          return AppExprFail(c, "'%%' needs two ints (got %s and %s)", AppExprTypeName(t), AppExprTypeName(r));
+        t = (t == AppExprType_Unknown && r == AppExprType_Unknown) ? AppExprType_Unknown : ImGuiAppFieldType_Int;
+      }
+      else
+      {
+        if (!AppExprIsNumeric(t) || !AppExprIsNumeric(r))
+          return AppExprFail(c, "'%c' needs numbers (got %s and %s)", op, AppExprTypeName(t), AppExprTypeName(r));
+        t = AppExprPromote(t, r);
+      }
+    }
+    return t;
+  }
+
+  static int AppExprAdd(AppExprCtx* c)
+  {
+    int t = AppExprMul(c);
+    while (!c->Failed)
+    {
+      char op;
+      if      (AppExprAccept(c, "+")) op = '+';
+      else if (AppExprAccept(c, "-")) op = '-';
+      else break;
+      const int r = AppExprMul(c);
+      if (c->Failed) return r;
+      c->StructType[0] = 0;
+      if (!AppExprIsNumeric(t) || !AppExprIsNumeric(r))
+        return AppExprFail(c, "'%c' needs numbers (got %s and %s)", op, AppExprTypeName(t), AppExprTypeName(r));
+      t = AppExprPromote(t, r);
+    }
+    return t;
+  }
+
+  static int AppExprRel(AppExprCtx* c)
+  {
+    int t = AppExprAdd(c);
+    while (!c->Failed && (AppExprAccept(c, "<=") || AppExprAccept(c, ">=") || AppExprAccept(c, "<") || AppExprAccept(c, ">")))
+    {
+      const int r = AppExprAdd(c);
+      if (c->Failed) return r;
+      c->StructType[0] = 0;
+      if (!AppExprIsNumeric(t) || !AppExprIsNumeric(r))
+        return AppExprFail(c, "comparison needs numbers (got %s and %s)", AppExprTypeName(t), AppExprTypeName(r));
+      t = ImGuiAppFieldType_Bool;
+    }
+    return t;
+  }
+
+  static int AppExprEq(AppExprCtx* c)
+  {
+    int t = AppExprRel(c);
+    while (!c->Failed && (AppExprAccept(c, "==") || AppExprAccept(c, "!=")))
+    {
+      const int r = AppExprRel(c);
+      if (c->Failed) return r;
+      c->StructType[0] = 0;
+      const bool ok = (AppExprIsNumeric(t) && AppExprIsNumeric(r)) || (AppExprIsBool(t) && AppExprIsBool(r));
+      if (!ok)
+        return AppExprFail(c, "'==' / '!=' needs two numbers or two bools (got %s and %s)", AppExprTypeName(t), AppExprTypeName(r));
+      t = ImGuiAppFieldType_Bool;
+    }
+    return t;
+  }
+
+  static int AppExprXor(AppExprCtx* c)
+  {
+    int t = AppExprEq(c);
+    while (!c->Failed && AppExprAccept(c, "^"))
+    {
+      const int r = AppExprEq(c);
+      if (c->Failed) return r;
+      c->StructType[0] = 0;
+      if (AppExprIsBool(t) && AppExprIsBool(r))
+        t = ImGuiAppFieldType_Bool;         // the change idiom: temp ^ last
+      else if (AppExprIsInt(t) && AppExprIsInt(r))
+        t = ImGuiAppFieldType_Int;
+      else
+        return AppExprFail(c, "'^' pairs two bools (the change idiom) or two ints (got %s and %s)", AppExprTypeName(t), AppExprTypeName(r));
+    }
+    return t;
+  }
+
+  static int AppExprAnd(AppExprCtx* c)
+  {
+    int t = AppExprXor(c);
+    while (!c->Failed && AppExprAccept(c, "&&"))
+    {
+      const int r = AppExprXor(c);
+      if (c->Failed) return r;
+      c->StructType[0] = 0;
+      if (!AppExprIsBool(t) || !AppExprIsBool(r))
+        return AppExprFail(c, "'&&' needs two bools (got %s and %s)", AppExprTypeName(t), AppExprTypeName(r));
+      t = ImGuiAppFieldType_Bool;
+    }
+    return t;
+  }
+
+  static int AppExprOr(AppExprCtx* c)
+  {
+    int t = AppExprAnd(c);
+    while (!c->Failed && AppExprAccept(c, "||"))
+    {
+      const int r = AppExprAnd(c);
+      if (c->Failed) return r;
+      c->StructType[0] = 0;
+      if (!AppExprIsBool(t) || !AppExprIsBool(r))
+        return AppExprFail(c, "'||' needs two bools (got %s and %s)", AppExprTypeName(t), AppExprTypeName(r));
+      t = ImGuiAppFieldType_Bool;
+    }
+    return t;
+  }
+
+  bool AppEventExprCheck(const ImGuiAppGraph* g, const ImGuiAppNode* n, const ImGuiAppEventDesc* ev, char* err, int err_size)
+  {
+    IM_ASSERT(g != nullptr && n != nullptr && ev != nullptr);
+    if (err != nullptr && err_size > 0)
+      err[0] = 0;
+    if (ev->Expr[0] == 0)
+      return true;   // empty: codegen copies the watched temp field
+
+    AppExprCtx c;
+    c.Graph = g;
+    c.Node = n;
+    c.Cur = ev->Expr;
+    c.Failed = false;
+    c.Err[0] = 0;
+    c.StructType[0] = 0;
+
+    const int t = AppExprOr(&c);
+    if (!c.Failed)
+    {
+      AppExprSkipBlanks(&c);
+      if (*c.Cur != 0)
+        AppExprFail(&c, "unexpected '%.12s'", c.Cur);
+    }
+
+    // The expression lands in `data-><DstField> = <Expr>;` -- its type must fit the destination.
+    if (!c.Failed && ev->Action == ImGuiAppEventAction_SetField && ev->DstField[0] && t != AppExprType_Unknown)
+    {
+      char dst_id[IM_LABEL_SIZE];
+      AppSanitizeIdentifier(dst_id, IM_ARRAYSIZE(dst_id), ev->DstField);
+      char dst_struct[IM_LABEL_SIZE];
+      dst_struct[0] = 0;
+      const int dt = AppExprLookupField(g, n, 0, dst_id, dst_struct, IM_ARRAYSIZE(dst_struct));
+      if (dt == ImGuiAppFieldType_Bool && t != ImGuiAppFieldType_Bool)
+        AppExprFail(&c, "expr is %s but data->%s is bool -- compare explicitly", AppExprTypeName(t), dst_id);
+      else if ((dt == ImGuiAppFieldType_Float || dt == ImGuiAppFieldType_Int || dt == ImGuiAppFieldType_Double) && !AppExprIsNumeric(t))
+        AppExprFail(&c, "expr is %s but data->%s is %s", AppExprTypeName(t), dst_id, AppExprTypeName(dt));
+      else if ((dt == ImGuiAppFieldType_Vec2 || dt == ImGuiAppFieldType_Vec4) && t != dt)
+        AppExprFail(&c, "expr is %s but data->%s is %s", AppExprTypeName(t), dst_id, AppExprTypeName(dt));
+      else if (dt == ImGuiAppFieldType_String)
+        AppExprFail(&c, "data->%s is char[] -- string fields cannot be event targets", dst_id);
+      else if (dt == ImGuiAppFieldType_Struct && (t != ImGuiAppFieldType_Struct || strcmp(c.StructType, dst_struct) != 0))
+        AppExprFail(&c, "data->%s is struct %s -- assign a whole %s field", dst_id, dst_struct, dst_struct);
+      // dt < 0 (missing destination) is reported by AppGraphValidate separately.
+    }
+
+    if (c.Failed && err != nullptr)
+      ImStrncpy(err, c.Err, err_size);
+    return !c.Failed;
   }
 
   // Emit a control struct (and its data structs) with derived dependencies + binding assignment lines.

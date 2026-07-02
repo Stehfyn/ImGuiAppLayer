@@ -568,6 +568,15 @@ namespace ImGui
   // empty windows, and dependency cycles. Live-mirror nodes are skipped (read-only). Clears nothing.
   IMGUI_API void                AppGraphValidate(const ImGuiAppGraph* g, ImVector<ImGuiAppGraphIssue>* out);
 
+  // Type-check one authored event's Expr against the control's effective field lists. The grammar is tiny on
+  // purpose (events stay analyzable data, not strings): field refs `temp_data->x` / `last_temp_data->x` /
+  // `data->x` / `<dep_param>-><field>`, nested struct members via '.', bool/int/float literals, parens, and
+  // scalar operators at C precedence (! unary- * / % + - ^ comparisons && ||). `^` pairs bools (the change
+  // idiom) or ints. The result type must fit DstField. Empty Expr is valid (codegen copies the watched temp
+  // field). Returns true when well-typed; else writes a diagnostic to err. Used by AppGraphValidate and the
+  // events editor; exposed so tests can drive it directly.
+  IMGUI_API bool                AppEventExprCheck(const ImGuiAppGraph* g, const ImGuiAppNode* n, const ImGuiAppEventDesc* ev, char* err, int err_size);
+
   // Whole-graph codegen: data structs + controls with derived DataDependencies (topo order) + one bring-up
   // function pushing layers, then windows/sidebars, then controls. Appends to *out.
   IMGUI_API void                GenerateAppGraphCode(const ImGuiAppGraph* g, ImGuiTextBuffer* out);
