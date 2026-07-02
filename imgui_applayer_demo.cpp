@@ -36,6 +36,11 @@ namespace
     char label[128];
     char type[128];
     float max_timer_secs;
+    ImU64 rng;                 // deterministic effect source: randomness kept IN the state (see ImAppRandom).
+                               // Seeded once from the clock in OnInitialize (an init-time effect becomes
+                               // state), then only ever stepped by OnUpdate -- so snapshots capture it and
+                               // record/replay reproduces every "random" roll exactly. rand()/srand() would
+                               // be a hidden effect that breaks the replay theorem (contract 9 detects it).
   };
 
   struct RandomTimeTempData
@@ -45,30 +50,29 @@ namespace
 
   struct RandomTimeControlDemo : ImGuiAppControl <RandomTimeData, RandomTimeTempData>
   {
-    // Random time between 1 and 30 seconds
-    static float GenerateTime() { return static_cast<float>(1 + (rand() % 30)); }
+    // Random time between 1 and 30 seconds, drawn from the control's own seed.
+    static float GenerateTime(ImU64* rng) { return (float)ImAppRandomInt(rng, 1, 30); }
 
     virtual void OnInitialize(ImGuiApp*, RandomTimeData* data) const override final
     {
       std::string_view sv;
-
-      srand(static_cast<unsigned int>(time(nullptr)));
 
       sv = ImGuiType<decltype(this)>::Name;
 
       ImStrncpy(data->type, sv.data(), sv.length() + 1); // +1: ImStrncpy copies count-1 chars
       ImFormatString(data->label, sizeof(data->label), "%s", data->type);
 
-      data->max_timer_secs = GenerateTime();
+      data->rng = (ImU64)time(nullptr);
+      data->max_timer_secs = GenerateTime(&data->rng);
     }
 
     virtual void OnUpdate(float dt, RandomTimeData* data, const RandomTimeTempData* temp_data, const RandomTimeTempData* last_temp_data) const override final
     {
-      IM_UNUSED(temp_data);
+      IM_UNUSED(dt);
       IM_UNUSED(last_temp_data);
 
       if (temp_data->generate)
-        data->max_timer_secs = GenerateTime();
+        data->max_timer_secs = GenerateTime(&data->rng);
     }
 
     virtual void OnRender(const RandomTimeData* data, RandomTimeTempData* temp_data) const override final
@@ -246,16 +250,21 @@ namespace
   // so there is no "App" container node. Seed one window + one control to show the two pillars at once.
   void SeedAppGraph(ImGuiAppGraph* graph)
   {
-    // Explicit positions clear to the RIGHT of the live layer master column (which packs at x ~40..560), so the
-    // default window + control are visible and never sit behind the mirrored layer stack. Set HasGridPos so it
-    // sticks.
+    // The authored foundation is guaranteed here: the four layers are the frame's phases and anchor the canvas
+    // root whether or not a live mirror exists. The mirror upserts ONTO them (BuildAppLiveGraph skips live
+    // layers that have a design twin), so there are never design/live duplicates of a phase.
+    ImGui::AppGraphEnsureFoundation(graph);
+
+    // Explicit positions clear to the RIGHT of the layer master column + its pipeline group box (the column
+    // packs at x ~110..630 and the box adds padding), so the default window + control never occlude the layer
+    // stack. Set HasGridPos so it sticks.
     ImGuiAppNode* win  = ImGui::AppGraphAddNode(graph, ImGuiAppNodeKind_Window,  "MainWindow");
-    win->GridPos = ImVec2(640.0f, 60.0f);
+    win->GridPos = ImVec2(760.0f, 96.0f);
     win->HasGridPos = true;
     win->_NeedsPlace = true;
 
     ImGuiAppNode* ctrl = ImGui::AppGraphAddNode(graph, ImGuiAppNodeKind_Control, "NewControl");
-    ctrl->GridPos = ImVec2(640.0f, 240.0f);
+    ctrl->GridPos = ImVec2(760.0f, 320.0f);
     ctrl->HasGridPos = true;
     ctrl->_NeedsPlace = true;
   }
@@ -276,13 +285,11 @@ namespace
         ImGui::AppGraphAddBuiltin(graph, ImGuiAppNodeKind_Control, "Breathing", "BreathingData");
       ImGui::EndMenu();
     }
-    if (ImGui::BeginMenu("Layer"))
+    // The core phases are guaranteed by the foundation; the only authorable layer is a Custom subclass.
+    if (ImGui::MenuItem("Custom Layer"))
     {
-      if (ImGui::MenuItem("Task", nullptr, false, !ImGui::AppGraphHasLayerType(graph, ImGuiAppLayerType_Task)))       { ImGuiAppNode* n = ImGui::AppGraphAddNode(graph, ImGuiAppNodeKind_Layer, "TaskLayer");    n->LayerType = ImGuiAppLayerType_Task;    }
-      if (ImGui::MenuItem("Command", nullptr, false, !ImGui::AppGraphHasLayerType(graph, ImGuiAppLayerType_Command))) { ImGuiAppNode* n = ImGui::AppGraphAddNode(graph, ImGuiAppNodeKind_Layer, "CommandLayer"); n->LayerType = ImGuiAppLayerType_Command; }
-      if (ImGui::MenuItem("Status", nullptr, false, !ImGui::AppGraphHasLayerType(graph, ImGuiAppLayerType_Status)))   { ImGuiAppNode* n = ImGui::AppGraphAddNode(graph, ImGuiAppNodeKind_Layer, "StatusLayer");  n->LayerType = ImGuiAppLayerType_Status;  }
-      if (ImGui::MenuItem("Window", nullptr, false, !ImGui::AppGraphHasLayerType(graph, ImGuiAppLayerType_Window)))   { ImGuiAppNode* n = ImGui::AppGraphAddNode(graph, ImGuiAppNodeKind_Layer, "WindowLayer");  n->LayerType = ImGuiAppLayerType_Window;  }
-      ImGui::EndMenu();
+      ImGuiAppNode* n = ImGui::AppGraphAddNode(graph, ImGuiAppNodeKind_Layer, "CustomLayer");
+      n->LayerType = ImGuiAppLayerType_Custom;
     }
     if (ImGui::MenuItem("Struct"))  ImGui::AppGraphAddNode(graph, ImGuiAppNodeKind_Struct,  "NewStruct");
     if (ImGui::MenuItem("Window"))  ImGui::AppGraphAddNode(graph, ImGuiAppNodeKind_Window,  "Window");
@@ -290,7 +297,7 @@ namespace
   }
 
   //---------------------------------------------------------------------------------------------------
-  // Dogfooded Metrics/Debugger node editor: the editor is itself an ImGuiApp object model.
+  // Dogfooded Composer node editor: the editor is itself an ImGuiApp object model.
   //
   // The graph IS the document. ONE control (GraphDocControl) owns it as PersistData and is the single
   // writer; the panels are controls that receive `const GraphDocData*` as a typed dependency (read), and
@@ -315,6 +322,9 @@ namespace
     char            GraphPath[256];
     char            HeaderPath[256];
     ImGuiApp*       Mirror;           // app reflected into the live graph (set after push; see ShowAppLayerDemo)
+    ImGuiAppStateHistory MirrorHistory;   // the mirrored app's recorded state ring (time travel)
+    bool            TimeScrub;        // true: freeze the mirror at TimeScrubIndex instead of recording
+    int             TimeScrubIndex;
   };
   struct GraphDocTempData {};
 
@@ -335,6 +345,8 @@ namespace
       data->CodeH       = 0.0f;          // collapsed
       data->WriteMsg[0] = 0;
       data->Mirror      = nullptr;       // set after push by ShowAppLayerDemo
+      data->TimeScrub   = false;
+      data->TimeScrubIndex = 0;
       ImStrncpy(data->GraphPath,  "imguix_node_graph.txt",      sizeof(data->GraphPath));
       ImStrncpy(data->HeaderPath, "imguix_generated_control.h", sizeof(data->HeaderPath));
       if (data->Graph.Nodes.empty())
@@ -349,6 +361,23 @@ namespace
       if (data->Mirror != nullptr)
       {
         ImGui::BuildAppLiveGraph(data->Mirror, &data->Graph);
+      }
+
+      // Time travel over the mirrored app. While scrubbing, re-impose the chosen snapshot every frame (the
+      // mirror advances exactly one frame from it after we return -- a stable freeze at that moment);
+      // otherwise record this frame. Nothing here is example-specific: the state discipline (all durable
+      // state in registered storage, OnUpdate the sole mutator) makes ANY framework app scrubbable.
+      if (data->Mirror != nullptr && data->Mirror->Layers.Size > 0)   // composed (IsInitialized == platform-only)
+      {
+        if (data->TimeScrub)
+        {
+          if (!ImGui::AppStateRestore(data->Mirror, &data->MirrorHistory, data->TimeScrubIndex))
+            data->TimeScrub = false;   // composition changed under us -> timeline no longer applies
+        }
+        else
+        {
+          ImGui::AppStateSnapshot(data->Mirror, &data->MirrorHistory);
+        }
       }
     }
   };
@@ -382,6 +411,10 @@ namespace
     bool Diff;          // diff current graph's codegen vs the saved-on-disk graph -> clipboard
     bool HistGoto;      // time-travel scrubber moved this frame
     int  HistIndex;     // target snapshot index
+    bool ScrubSet;      // "App time" checkbox toggled this frame
+    bool Scrub;         // its captured value
+    bool ScrubIdxSet;   // app-time slider moved this frame
+    int  ScrubIdx;      // target app-state snapshot index
   };
   struct ToolbarControl : ImGuiAppControl<ToolbarData, ToolbarTempData>
   {
@@ -401,6 +434,7 @@ namespace
       if (temp_data->Load)
       {
         ImGui::LoadAppGraph(doc->GraphPath, &doc->Graph);
+        ImGui::AppGraphEnsureFoundation(&doc->Graph);   // the frame's phases anchor the root, always
       }
       if (temp_data->WriteHeader)
       {
@@ -436,6 +470,16 @@ namespace
       if (temp_data->HistGoto)
       {
         ImGui::AppGraphHistoryGoto(&doc->Graph, temp_data->HistIndex);
+      }
+      if (temp_data->ScrubSet)
+      {
+        doc->TimeScrub = temp_data->Scrub;
+        if (doc->TimeScrub)
+          doc->TimeScrubIndex = ImMax(0, doc->MirrorHistory.Count - 1);   // enter the timeline at "now"
+      }
+      if (temp_data->ScrubIdxSet)
+      {
+        doc->TimeScrubIndex = temp_data->ScrubIdx;
       }
       if (temp_data->Diff)
       {
@@ -536,6 +580,32 @@ namespace
         temp_data->SetShowLive = ImGui::Checkbox("Show live mirror", &show_live);
         temp_data->ShowLive    = show_live;
         ImGui::SetItemTooltip("Hide/show read-only nodes mirrored from the running app. Hiding never deletes your design.");
+
+        // App timeline: pause the MIRRORED app and scrub its recorded state ring. No example-specific code --
+        // the framework's state discipline (OnUpdate sole mutator, state in registered storage) makes any app
+        // scrubbable; this is that theorem as a slider (watch the Breathing timer run backwards).
+        temp_data->ScrubSet = false;
+        temp_data->ScrubIdxSet = false;
+        const int app_frames = doc->MirrorHistory.Count;
+        if (app_frames > 1 || doc->TimeScrub)
+        {
+          EditorToolSep(em);
+          bool scrub = doc->TimeScrub;
+          temp_data->ScrubSet = ImGui::Checkbox("App time", &scrub);
+          temp_data->Scrub    = scrub;
+          ImGui::SetItemTooltip("Freeze the running app and scrub its recorded state history (%d frames)", app_frames);
+          if (doc->TimeScrub && app_frames > 0)
+          {
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(em * 9.0f);
+            int idx = ImClamp(doc->TimeScrubIndex, 0, app_frames - 1);
+            if (ImGui::SliderInt("##appscrub", &idx, 0, app_frames - 1, "frame %d"))
+            {
+              temp_data->ScrubIdxSet = true;
+              temp_data->ScrubIdx    = idx;
+            }
+          }
+        }
       }
       ImGui::EndChild();
     }
@@ -615,7 +685,7 @@ namespace
       {
         const ImGuiApp* a = doc->Mirror;
         ImFormatString(data->MirrorCounts, IM_ARRAYSIZE(data->MirrorCounts), "L%d W%d S%d C%d", a->Layers.Size, a->Windows.Size, a->Sidebars.Size, a->Controls.Size);
-        data->MirrorInit = a->Initialized;
+        data->MirrorInit = a->Layers.Size > 0;   // "composed"; Initialized is the platform flag, never set here
       }
 
       ImGui::AppGraphSelectionBreadcrumb(&doc->Graph, doc->Selection, data->Breadcrumb, IM_ARRAYSIZE(data->Breadcrumb));
@@ -932,9 +1002,9 @@ namespace
 
   // The host window: empty body; its hosted controls (toolbar, strip, body) fill it in push order. Label is
   // fixed (not the type-derived unique label) so the saved .ini dock binding + central-node dock still match.
-  struct MetricsDebuggerWindow : ImGuiAppWindow<MetricsDebuggerWindow>
+  struct ComposerWindow : ImGuiAppWindow<ComposerWindow>
   {
-    MetricsDebuggerWindow() { ImStrncpy(this->Label, "ImGuiAppLayer Metrics/Debugger", sizeof(this->Label)); }
+    ComposerWindow() { ImStrncpy(this->Label, "ImGuiAppLayer Composer", sizeof(this->Label)); }
     virtual void OnRender(const ImGuiApp*) const override final {}
   };
 
@@ -955,6 +1025,7 @@ namespace
   };
   struct DemoMenuTempData
   {
+    bool Rendered;   // false until OnRender ran once (the first OnUpdate must not consume zeroed toggles)
     bool ShowBaseWindow;
     bool ShowStatusBar;
     bool ShowRandomTime;
@@ -963,9 +1034,21 @@ namespace
   };
   struct DemoMenuControl : ImGuiAppControl<DemoMenuData, DemoMenuTempData>
   {
+    // First-run defaults show the framework doing its job: the two idiom controls running live and the
+    // Composer mirroring them. An empty screen taught nothing.
+    virtual void OnInitialize(ImGuiApp* app, DemoMenuData* data) const override final
+    {
+      IM_UNUSED(app);
+      data->ShowRandomTime = true;
+      data->ShowBreathing  = true;
+      data->ShowMetrics    = true;
+    }
+
     virtual void OnUpdate(float dt, DemoMenuData* data, const DemoMenuTempData* temp_data, const DemoMenuTempData* last_temp_data) const override final
     {
       IM_UNUSED(dt);
+      if (!temp_data->Rendered)   // first update precedes any render: zeroed temp must not wipe the defaults
+        return;
       data->ShowBaseWindow = temp_data->ShowBaseWindow;
       data->ShowStatusBar  = temp_data->ShowStatusBar;
       data->ShowRandomTime = temp_data->ShowRandomTime;
@@ -975,6 +1058,7 @@ namespace
 
     virtual void OnRender(const DemoMenuData* data, DemoMenuTempData* temp_data) const override final
     {
+      temp_data->Rendered = true;
       bool show_base    = data->ShowBaseWindow;
       bool show_status  = data->ShowStatusBar;
       bool show_random  = data->ShowRandomTime;
@@ -992,7 +1076,7 @@ namespace
         }
         if (ImGui::BeginMenu("Tools"))
         {
-          ImGui::MenuItem("Metrics/Debugger", nullptr, &show_metrics);
+          ImGui::MenuItem("Composer", nullptr, &show_metrics);
           ImGui::EndMenu();
         }
         ImGui::EndMenuBar();
@@ -1006,7 +1090,7 @@ namespace
 
       if (ImGui::CollapsingHeader("ImGuiApp Status", ImGuiTreeNodeFlags_DefaultOpen))
       {
-        ImGui::TextDisabled("See Tools > Metrics/Debugger -> status strip for composition, lifecycle and FPS.");
+        ImGui::TextDisabled("See Tools > Composer -> status strip for composition, lifecycle and FPS.");
       }
 
       temp_data->ShowBaseWindow = show_base;
@@ -1076,7 +1160,7 @@ namespace ImGui
       }
 
       // ---- editor_app: a dedicated, never-rebuilt ImGuiApp hosting BOTH the demo's control panel and the
-      //      dogfooded Metrics/Debugger. Pushed once so the graph + toggle state survive example rebuilds. Toggle
+      //      dogfooded Composer. Pushed once so the graph + toggle state survive example rebuilds. Toggle
       //      state lives in DemoMenuData (PersistData), not function statics. Only the WindowLayer is needed.
       static ImGuiApp editor_app;
       static bool editor_ready = false;
@@ -1093,8 +1177,8 @@ namespace ImGui
         panel->InitialPos  = vp->WorkPos + ImVec2(vp->WorkSize.x * 0.02f, vp->WorkSize.y * 0.04f);
         ImGui::PushWindowControl<DemoMenuControl>(&editor_app, panel);
 
-        // Metrics/Debugger (GraphDoc + Toolbar + StatusStrip + EditorBody).
-        ImGui::PushAppWindow<MetricsDebuggerWindow>(&editor_app);
+        // Composer (GraphDoc + Toolbar + StatusStrip + EditorBody).
+        ImGui::PushAppWindow<ComposerWindow>(&editor_app);
         ImGuiAppWindowBase* metrics = editor_app.Windows.back();
         metrics->HasInitialPlacement = true;
         metrics->InitialSize = ImVec2(vp->WorkSize.x * 0.66f, vp->WorkSize.y * 0.66f);
@@ -1130,9 +1214,12 @@ namespace ImGui
       }
 
       // Reconcile desired -> live app. Full rebuild keeps app storage consistent across toggles. Also fire on
-      // first frame (!Initialized) so the framework layers (Task/Command/Status/Window) exist immediately and
-      // are visible in the tree/canvas without needing to toggle an example.
-      if (!app.IsInitialized() ||
+      // the first frame (no layers yet) so the framework foundation exists immediately and is visible in the
+      // tree/canvas without toggling an example. NOT !IsInitialized(): that flag belongs to the PLATFORM
+      // bring-up (ImGuiApp::Initialize) and never goes true for this embedded app -- gating on it rebuilt the
+      // example EVERY frame (RandomTime re-rolled per frame, Breathing never accumulated, the state history
+      // reset before it could hold two frames).
+      if (app.Layers.empty() ||
           st->AppliedBaseWindow != st->ShowBaseWindow ||
           st->AppliedStatusBar  != st->ShowStatusBar  ||
           st->AppliedRandomTime != st->ShowRandomTime ||

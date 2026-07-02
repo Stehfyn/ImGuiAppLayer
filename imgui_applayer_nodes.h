@@ -261,8 +261,10 @@ enum ImGuiAppNodeKind_
   ImGuiAppNodeKind_COUNT,
 };
 
-// The four fixed layer classes (imgui_applayer.h: ImGuiAppTaskLayer..ImGuiAppWindowLayer). A Layer node
-// selects one; codegen emits PushAppLayer<ImGuiAppXxxLayer>.
+// The four CORE layer classes (imgui_applayer.h: ImGuiAppTaskLayer..ImGuiAppWindowLayer) are the frame's
+// phases: permanent, one each, immutable type -- codegen emits PushAppLayer<ImGuiAppXxxLayer>. Custom is a
+// user-authored ImGuiAppLayer subclass: the NODE'S NAME is its class name, any number may exist, and codegen
+// emits the subclass skeleton plus PushAppLayer<Name>.
 typedef int ImGuiAppLayerType;
 enum ImGuiAppLayerType_
 {
@@ -270,6 +272,7 @@ enum ImGuiAppLayerType_
   ImGuiAppLayerType_Command,
   ImGuiAppLayerType_Status,
   ImGuiAppLayerType_Window,
+  ImGuiAppLayerType_Custom,
   ImGuiAppLayerType_COUNT,
 };
 
@@ -369,6 +372,44 @@ struct ImGuiAppCommandDesc
   ImGuiAppCommandDesc() { ImStrncpy(Name, "NewCommand", IM_ARRAYSIZE(Name)); }
 };
 
+// The framework's event idiom, made authorable. OnRender records raw input into TempData (zeroed every frame);
+// OnUpdate receives BOTH this frame's TempData and last frame's, so user code derives events by comparing them --
+// the demo's `temp_data->hovered ^ last_temp_data->hovered` (Breathing) and `temp_data->generate` (RandomTime).
+// An edge names which comparison the generated OnUpdate guards with.
+typedef int ImGuiAppEventEdge;
+enum ImGuiAppEventEdge_
+{
+  ImGuiAppEventEdge_Rising = 0,   // temp && !last   -- became true this frame (a click / press)
+  ImGuiAppEventEdge_Falling,      // !temp && last   -- became false this frame (a release)
+  ImGuiAppEventEdge_Changed,      // temp ^ last     -- either transition (Breathing's hover edge)
+  ImGuiAppEventEdge_Active,       // temp            -- level: every frame while true
+  ImGuiAppEventEdge_COUNT,
+};
+
+// What the event does when its edge fires. SetField mutates PersistData (OnUpdate is the sole mutator);
+// EmitCommand routes through the command pipeline: OnUpdate latches a persist bool, OnGetCommand emits it.
+typedef int ImGuiAppEventAction;
+enum ImGuiAppEventAction_
+{
+  ImGuiAppEventAction_SetField = 0,
+  ImGuiAppEventAction_EmitCommand,
+  ImGuiAppEventAction_COUNT,
+};
+
+// One authored event on a Control: "when <TempField> <edge> -> <action>". Codegen turns each into a guarded
+// block in OnUpdate (and, for EmitCommand, the latch + OnGetCommand emission).
+struct ImGuiAppEventDesc
+{
+  char                TempField[IM_LABEL_SIZE];   // watched TempData field
+  ImGuiAppEventEdge   Edge;
+  ImGuiAppEventAction Action;
+  char                DstField[IM_LABEL_SIZE];    // SetField: PersistData destination
+  char                Expr[IM_LABEL_SIZE];        // SetField: source expression (emitted verbatim); empty -> temp_data-><TempField>
+  char                Command[IM_LABEL_SIZE];     // EmitCommand: one of the control's selected commands
+
+  ImGuiAppEventDesc() { TempField[0] = 0; Edge = ImGuiAppEventEdge_Changed; Action = ImGuiAppEventAction_SetField; DstField[0] = 0; Expr[0] = 0; Command[0] = 0; }
+};
+
 // One node in the authored graph. Embeds ImGuiAppNodeDraft so the existing rename/field-edit/codegen
 // helpers apply verbatim and a legacy "[Draft]" maps 1:1 to a Control node. Most fields are kind-specific.
 struct ImGuiAppNode
@@ -394,11 +435,13 @@ struct ImGuiAppNode
   bool              IsPromoted;     // design control whose emitted data type matches a live node (transient)
   ImGuiID           LiveKey;        // stable upsert key for a live node (so its position survives re-mirroring)
   ImVector<ImGuiAppCommandDesc> Commands; // CommandLayer: definitions. Control: selected commands emitted by OnGetCommand.
+  ImVector<ImGuiAppEventDesc>   Events;   // Control: authored temp-vs-last-temp events (see ImGuiAppEventDesc)
   ImVector<ImGuiAppNodePort> Ports;
   int               FieldList;       // Field node: which list it belongs to on its owner (0 = Persist, 1 = Temp)
   int               PersistStructId; // Control: Struct node its PersistData was exploded into (-1 = inline)
   int               TempStructId;    // Control: Struct node its TempData was exploded into (-1 = inline)
   bool              GroupCollapsed;  // owner whose group is folded: its descendants are hidden behind a proxy chip (transient view state, not serialized)
+  bool              Hidden;          // outliner eye toggle / isolate: not submitted to the canvas (transient view state, not serialized)
 
   ImGuiAppNode()
   {
@@ -408,6 +451,7 @@ struct ImGuiAppNode
     GridPos = ImVec2(0.0f, 0.0f); HasGridPos = false; _NeedsPlace = false; BodyAttrId = 0;
     IsLive = false; IsPromoted = false; LiveKey = 0; FieldList = 0; PersistStructId = -1; TempStructId = -1;
     GroupCollapsed = false;
+    Hidden = false;
   }
 };
 
@@ -430,6 +474,9 @@ struct ImGuiAppGraph
   ImVector<ImGuiAppNodeLink>     Links;
   ImVector<ImGuiAppFieldBinding> Bindings;
   ImVector<int>                  Selection;   // multi-selection (node ids); the single selected_node_id is primary
+  ImVector<int>                  ViewScope;   // drill-down scope stack (node ids, outer->inner); empty = whole app.
+                                              // Transient view state (not serialized): Tab enters the selected
+                                              // node's composition, Esc goes up, breadcrumb segments jump.
   int NextId;
   int EditingNodeId;             // node whose title is being renamed inline, or -1
   char LastLinkErr[IM_LABEL_SIZE];  // last refused-link reason; transient UI state, NOT in Save/Load
@@ -572,6 +619,11 @@ namespace ImGui
   IMGUI_API int                 AppGraphPrefabCount();
   IMGUI_API const char*         AppGraphPrefabName(int index);
   IMGUI_API int                 AppGraphInstantiatePrefab(ImGuiAppGraph* g, int index, ImVec2 origin);
+
+  // Guarantee the four-layer framework foundation (Window, Task, Command, Status) exists in g -- adds any that
+  // are missing, never duplicates. These layers are permanent (AppGraphRemoveNode refuses them) and are the base
+  // every app builds windows/controls/commands on top of. Call on new/empty graphs and after load.
+  IMGUI_API void                AppGraphEnsureFoundation(ImGuiAppGraph* g);
 
   // One-shot tidy layout: arrange design nodes as a left-to-right containment tree (window -> hosted controls
   // -> data structs -> fields), siblings stacked and parents centered. Bound to the L key inside the editor and
