@@ -273,8 +273,12 @@ namespace ImGui
   // so they CANNOT be blocked by an overlapping ImGui item (the cause of the dead outliner-header buttons).
   static bool AppPtInRectHovered(ImVec2 mn, ImVec2 mx)
   {
+    // AllowWhenBlockedByActiveItem: a mouse PRESS makes the item under the cursor active before this runs,
+    // and plain IsWindowHovered() reports false while any item is active -- which is exactly the click frame.
+    // Without the flag every one of these flat buttons dies when it overlaps an activatable item (tree row,
+    // focused InputText). Stray clicks can't leak in: IsMouseClicked is only true on the press frame itself.
     const ImVec2 m = ImGui::GetIO().MousePos;
-    return ImGui::IsWindowHovered() && m.x >= mn.x && m.x < mx.x && m.y >= mn.y && m.y < mx.y;
+    return ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem) && m.x >= mn.x && m.x < mx.x && m.y >= mn.y && m.y < mx.y;
   }
 
   static bool AppBlToggleChip(const char* str_id, const char* label, bool on, ImU32 accent)
@@ -8146,10 +8150,13 @@ namespace ImGui
   // trip ImGui's cursor-boundary assert). Returns true on a left click within the icon's circle.
   static bool AppTreeRowIcon(const char* icon, ImVec2 center, float r, ImU32 col)
   {
+    // AllowWhenBlockedByActiveItem: the icon overlays the row's TreeNode item, and the mouse press makes
+    // that item active BEFORE this hit-test runs -- plain IsWindowHovered() is false on exactly the click
+    // frame (hover highlight worked, clicks never landed). See AppPtInRectHovered.
     const ImVec2 m = ImGui::GetIO().MousePos;
     const float dx = m.x - center.x;
     const float dy = m.y - center.y;
-    const bool hov = ImGui::IsWindowHovered() && (dx * dx + dy * dy) <= r * r;
+    const bool hov = ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem) && (dx * dx + dy * dy) <= r * r;
     ImDrawList* dl = ImGui::GetWindowDrawList();
     if (hov)
     {
@@ -8290,9 +8297,71 @@ namespace ImGui
     const ImVec2 rmn = ImGui::GetItemRectMin();
     const ImVec2 rmx = ImGui::GetItemRectMax();
 
-    if (row_clicked)
+    // Right-edge overlay (pure draw-list, manual hit-test -- no ImGui items, so the layout cursor is untouched):
+    // an always-on eye (hide/show this subtree), hover-revealed rename / duplicate / delete, else the meta count.
+    // Handled BEFORE the row's own click so an icon click consumes the press instead of also selecting the row.
+    bool icon_clicked = false;
+    {
+      const float rem = ImGui::GetFontSize();
+      const float r = rem * 0.62f;
+      const float cy = (rmn.y + rmx.y) * 0.5f;
+      float       x = rmx.x - r - rem * 0.2f;
+
+      // Foundation layers are always visible (permanent base) -- no eye toggle for them.
+      if (n->Kind != ImGuiAppNodeKind_Layer)
+      {
+        const char* eye_icon = n->Hidden ? ICON_FA_EYE_SLASH : ICON_FA_EYE;
+        const ImU32 eye_col = n->Hidden ? IM_COL32(210, 150, 90, 255) : ImGui::GetColorU32(ImGuiCol_Text, row_hovered ? 0.85f : 0.3f);
+        if (AppTreeRowIcon(eye_icon, ImVec2(x, cy), r, eye_col))
+        {
+          n->Hidden = !n->Hidden;
+          icon_clicked = true;
+        }
+        x -= r * 2.0f + rem * 0.05f;
+      }
+
+      if (row_hovered && !n->IsLive)
+      {
+        if (AppTreeRowIcon(ICON_FA_TRASH, ImVec2(x, cy), r, IM_COL32(212, 110, 110, 255)))
+        {
+          c->Act = 1;
+          c->ActNode = n->Id;
+          icon_clicked = true;
+        }
+        x -= r * 2.0f + rem * 0.05f;
+        if (n->Kind != ImGuiAppNodeKind_Layer)
+        {
+          const ImU32 ac = ImGui::GetColorU32(ImGuiCol_Text, 0.7f);
+          if (AppTreeRowIcon(ICON_FA_CLONE, ImVec2(x, cy), r, ac))
+          {
+            c->Act = 2;
+            c->ActNode = n->Id;
+            icon_clicked = true;
+          }
+          x -= r * 2.0f + rem * 0.05f;
+          if (AppTreeRowIcon(ICON_FA_PEN, ImVec2(x, cy), r, ac))
+          {
+            *c->RenameNode = n->Id;
+            *c->RenameFocus = true;
+            icon_clicked = true;
+          }
+        }
+      }
+      else
+      {
+        char meta[32];
+        AppTreeRowMeta(g, n, meta, IM_ARRAYSIZE(meta));
+        if (meta[0])
+        {
+          const ImVec2 ts = ImGui::CalcTextSize(meta);
+          ImGui::GetWindowDrawList()->AddText(ImVec2(x - ts.x, cy - ts.y * 0.5f), ImGui::GetColorU32(ImGuiCol_TextDisabled), meta);
+        }
+      }
+    }
+
+    if (row_clicked && !icon_clicked)
       AppTreeClick(g, n, c);
-    if (row_dblclick && !n->IsLive && c->RenameNode != nullptr)
+    if (row_dblclick && !icon_clicked && !n->IsLive && c->RenameNode != nullptr)
     {
       *c->RenameNode = n->Id;
       *c->RenameFocus = true;
@@ -8315,60 +8384,6 @@ namespace ImGui
         c->ActTarget = n->Id;
       }
       ImGui::EndDragDropTarget();
-    }
-
-    // Right-edge overlay (pure draw-list, manual hit-test -- no ImGui items, so the layout cursor is untouched):
-    // an always-on eye (hide/show this subtree), hover-revealed rename / duplicate / delete, else the meta count.
-    {
-      const float rem = ImGui::GetFontSize();
-      const float r = rem * 0.62f;
-      const float cy = (rmn.y + rmx.y) * 0.5f;
-      float       x = rmx.x - r - rem * 0.2f;
-
-      // Foundation layers are always visible (permanent base) -- no eye toggle for them.
-      if (n->Kind != ImGuiAppNodeKind_Layer)
-      {
-        const char* eye_icon = n->Hidden ? ICON_FA_EYE_SLASH : ICON_FA_EYE;
-        const ImU32 eye_col = n->Hidden ? IM_COL32(210, 150, 90, 255) : ImGui::GetColorU32(ImGuiCol_Text, row_hovered ? 0.85f : 0.3f);
-        if (AppTreeRowIcon(eye_icon, ImVec2(x, cy), r, eye_col))
-          n->Hidden = !n->Hidden;
-        x -= r * 2.0f + rem * 0.05f;
-      }
-
-      if (row_hovered && !n->IsLive)
-      {
-        if (AppTreeRowIcon(ICON_FA_TRASH, ImVec2(x, cy), r, IM_COL32(212, 110, 110, 255)))
-        {
-          c->Act = 1;
-          c->ActNode = n->Id;
-        }
-        x -= r * 2.0f + rem * 0.05f;
-        if (n->Kind != ImGuiAppNodeKind_Layer)
-        {
-          const ImU32 ac = ImGui::GetColorU32(ImGuiCol_Text, 0.7f);
-          if (AppTreeRowIcon(ICON_FA_CLONE, ImVec2(x, cy), r, ac))
-          {
-            c->Act = 2;
-            c->ActNode = n->Id;
-          }
-          x -= r * 2.0f + rem * 0.05f;
-          if (AppTreeRowIcon(ICON_FA_PEN, ImVec2(x, cy), r, ac))
-          {
-            *c->RenameNode = n->Id;
-            *c->RenameFocus = true;
-          }
-        }
-      }
-      else
-      {
-        char meta[32];
-        AppTreeRowMeta(g, n, meta, IM_ARRAYSIZE(meta));
-        if (meta[0])
-        {
-          const ImVec2 ts = ImGui::CalcTextSize(meta);
-          ImGui::GetWindowDrawList()->AddText(ImVec2(x - ts.x, cy - ts.y * 0.5f), ImGui::GetColorU32(ImGuiCol_TextDisabled), meta);
-        }
-      }
     }
 
     if (open)
